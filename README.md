@@ -33,7 +33,9 @@ You can designate speakers in your notes by simply wrapping their text. Text wit
 ## Installation & Running
 
 ### Download Executeable (Windows)
-Download the standalone `.exe` from the latest GitHub Release. No Python installation required!
+1. Navigate to the **[Releases](https://github.com/robgetgame/epub-reader/releases)** page on the right side of this GitHub repository.
+2. Download the latest `main.exe` binary file under **Assets**.
+3. Double click the `.exe` file to run the Reader instantly! No Python or external dependencies are required.
 
 ### Run via Command Line
 If you wish to run the project from standard Python source code:
