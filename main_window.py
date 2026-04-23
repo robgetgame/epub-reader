@@ -105,13 +105,12 @@ class MainWindow:
         epub_controls.pack(fill=tk.X, pady=10)
         
         ttk.Button(epub_controls, text="<< Prev", command=self._prev_chapter).pack(side=tk.LEFT, padx=2)
-        play_btn = ttk.Button(epub_controls, text="Play", command=self._start_play)
-        play_btn.pack(side=tk.LEFT, padx=5)
-        stop_btn = ttk.Button(epub_controls, text="Stop", command=self._stop_play)
-        stop_btn.pack(side=tk.LEFT, padx=5)
+        self.play_btn = ttk.Button(epub_controls, text="Play", command=self._toggle_play)
+        self.play_btn.pack(side=tk.LEFT, padx=2)
+        ttk.Button(epub_controls, text="Next >>", command=self._next_chapter).pack(side=tk.LEFT, padx=2)
         
         export_btn = ttk.Button(epub_controls, text="Export MP3", command=self._export_mp3_ui)
-        export_btn.pack(side=tk.LEFT, padx=5)
+        export_btn.pack(side=tk.LEFT, padx=15)
         
         # -------------- RIGHT PANE: Chapter Note --------------
         right_frame = ttk.Frame(paned)
