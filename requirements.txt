@@ -1,0 +1,5 @@
+ebooklib
+beautifulsoup4
+pywin32
+pygame
+edge-tts
