@@ -2,7 +2,8 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import os
 from epub_parser import EpubParser
-from tts_thread import TTSWorker
+from tts_thread import TTSWorker, NEURAL_VOICES
+from mp3_exporter import run_export_background
 from config_manager import ConfigManager
 
 class MainWindow:
@@ -104,9 +105,13 @@ class MainWindow:
         epub_controls.pack(fill=tk.X, pady=10)
         
         ttk.Button(epub_controls, text="<< Prev", command=self._prev_chapter).pack(side=tk.LEFT, padx=2)
-        self.play_btn = ttk.Button(epub_controls, text="Play", command=self._toggle_play)
-        self.play_btn.pack(side=tk.LEFT, padx=2)
-        ttk.Button(epub_controls, text="Next >>", command=self._next_chapter).pack(side=tk.LEFT, padx=2)
+        play_btn = ttk.Button(epub_controls, text="Play", command=self._start_play)
+        play_btn.pack(side=tk.LEFT, padx=5)
+        stop_btn = ttk.Button(epub_controls, text="Stop", command=self._stop_play)
+        stop_btn.pack(side=tk.LEFT, padx=5)
+        
+        export_btn = ttk.Button(epub_controls, text="Export MP3", command=self._export_mp3_ui)
+        export_btn.pack(side=tk.LEFT, padx=5)
         
         # -------------- RIGHT PANE: Chapter Note --------------
         right_frame = ttk.Frame(paned)
@@ -251,6 +256,9 @@ class MainWindow:
         if note_text:
             self.sandbox_area.insert("1.0", note_text)
         
+        # Determine Book Name for potential exporting later
+        self.current_book_name = os.path.basename(self.loaded_file).replace(".epub", "")
+        
         self.toc_listbox.selection_clear(0, tk.END)
         self.toc_listbox.selection_set(index)
         self.toc_listbox.see(index)
@@ -362,51 +370,7 @@ class MainWindow:
             pass
             
         # Parse it into sentences with Multi-Voice support
-        import re
-        
-        TAG_TO_VOICE = {
-            'yunxi': 'zh-CN-YunxiNeural',
-            'xiaoxiao': 'zh-CN-XiaoxiaoNeural',
-            'yunyang': 'zh-CN-YunyangNeural',
-            'guy': 'en-US-GuyNeural',
-            'aria': 'en-US-AriaNeural',
-            'jenny': 'en-US-JennyNeural'
-        }
-        
-        self.sandbox_sentences = []
-        active_override = None
-        
-        # Split by {tags} while keeping the tag as an element
-        tokens = re.split(r'(\{(?:/?)[a-zA-Z]+\})', raw_text)
-        
-        for token in tokens:
-            if not token: continue
-            
-            # End tags like {/yunxi}
-            match_close = re.match(r'^\{/([a-zA-Z]+)\}$', token.strip())
-            if match_close:
-                active_override = None
-                self.sandbox_sentences.append({'text': token, 'voice_id': 'SKIP'})
-                continue
-                
-            # Start tags like {yunxi}
-            match_open = re.match(r'^\{([a-zA-Z]+)\}$', token.strip())
-            if match_open:
-                tag_name = match_open.group(1).lower()
-                if tag_name in TAG_TO_VOICE:
-                    active_override = TAG_TO_VOICE[tag_name]
-                self.sandbox_sentences.append({'text': token, 'voice_id': 'SKIP'})
-                continue
-                
-            # Pure text block
-            if not token.strip():
-                # If it's purely whitespace visual padding, throw it in as SKIP so we don't speak silence
-                self.sandbox_sentences.append({'text': token, 'voice_id': 'SKIP'})
-                continue
-                
-            sub_sentences = self.parser.split_into_sentences(token)
-            for s in sub_sentences:
-                self.sandbox_sentences.append({'text': s, 'voice_id': active_override})
+        self.sandbox_sentences = self._parse_sandbox_text(raw_text)
         
         # Reset the sandbox text area to embed highlight tags
         # We temporarily disable edits to render the tags cleanly
@@ -452,6 +416,92 @@ class MainWindow:
         if not self.loaded_file: return
         raw_text = self.sandbox_area.get("1.0", tk.END).strip()
         self.config.save_chapter_note(self.loaded_file, self.current_chapter_idx, raw_text)
+
+    def _parse_sandbox_text(self, raw_text):
+        import re
+        TAG_TO_VOICE = {
+            'yunxi': 'zh-CN-YunxiNeural',
+            'xiaoxiao': 'zh-CN-XiaoxiaoNeural',
+            'yunyang': 'zh-CN-YunyangNeural',
+            'guy': 'en-US-GuyNeural',
+            'aria': 'en-US-AriaNeural',
+            'jenny': 'en-US-JennyNeural'
+        }
+        parsed = []
+        active_override = None
+        tokens = re.split(r'(\{(?:/?)[a-zA-Z]+\})', raw_text)
+        for token in tokens:
+            if not token: continue
+            if re.match(r'^\{/([a-zA-Z]+)\}$', token.strip()):
+                active_override = None
+                parsed.append({'text': token, 'voice_id': 'SKIP'})
+                continue
+            match_open = re.match(r'^\{([a-zA-Z]+)\}$', token.strip())
+            if match_open:
+                tag_name = match_open.group(1).lower()
+                if tag_name in TAG_TO_VOICE: active_override = TAG_TO_VOICE[tag_name]
+                parsed.append({'text': token, 'voice_id': 'SKIP'})
+                continue
+            if not token.strip():
+                parsed.append({'text': token, 'voice_id': 'SKIP'})
+                continue
+            sub_sentences = self.parser.split_into_sentences(token)
+            for s in sub_sentences: parsed.append({'text': s, 'voice_id': active_override})
+        return parsed
+
+    def _export_mp3_ui(self):
+        if not self.loaded_file or self.current_chapter_idx is None:
+            messagebox.showerror("Error", "No chapter loaded!")
+            return
+            
+        voice_display = self.voice_combo.get()
+        voice_id = self.voice_map.get(voice_display)
+        
+        if voice_id not in NEURAL_VOICES:
+            messagebox.showerror("Error", "MP3 Export exclusively supports high-quality Online Native Voices.\n\nPlease select one of the top Narrator or Neural Voices to enable exports.")
+            return
+            
+        raw_notes = self.sandbox_area.get("1.0", tk.END)
+        notes_parsed = self._parse_sandbox_text(raw_notes) if raw_notes.strip() else []
+        epub_s = self.current_sentences
+        
+        if not epub_s:
+            messagebox.showinfo("Export", "Chapter is entirely empty.")
+            return
+            
+        win = tk.Toplevel(self.root)
+        win.title("Exporting MP3")
+        win.geometry("300x120")
+        win.configure(bg="#1e1e1e")
+        win.transient(self.root)
+        win.grab_set()
+        
+        lbl = ttk.Label(win, text="Initializing Exporter Pipeline...", font=("Arial", 10))
+        lbl.pack(pady=20)
+        
+        try:
+            chap_name = self.parser.chapters[self.current_chapter_idx]['title']
+        except Exception:
+            chap_name = f"Chapter {self.current_chapter_idx + 1}"
+        
+        def on_status_update(status_text):
+            self.root.after(0, lambda: lbl.config(text=status_text))
+            
+        def on_complete(success):
+            if success:
+                self.root.after(0, lambda: [lbl.config(text="Export completed! Check Audio/ folder.", foreground="lightgreen"), self.root.after(3000, lambda: [win.grab_release(), win.destroy()])])
+            else:
+                self.root.after(0, lambda: [lbl.config(text="Export failed.", foreground="red"), self.root.after(3000, lambda: [win.grab_release(), win.destroy()])])
+                
+        run_export_background(
+            book_name=getattr(self, 'current_book_name', "Unknown Book"),
+            chapter_name=chap_name, 
+            epub_sentences=epub_s, 
+            notes_objects=notes_parsed, 
+            fallback_voice_id=voice_id, 
+            status_callback=on_status_update, 
+            done_callback=on_complete
+        )
 
     def _clear_sandbox(self):
         self._stop_play_sandbox()
