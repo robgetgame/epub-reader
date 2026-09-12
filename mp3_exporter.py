@@ -3,11 +3,11 @@ import asyncio
 import edge_tts
 import threading
 
-def run_export_background(book_name, chapter_name, epub_sentences, notes_objects, fallback_voice_id, status_callback, done_callback):
+def run_export_background(book_name, chapter_name, epub_sentences, notes_objects, fallback_voice_id, status_callback, done_callback, export_dir="Audio"):
     def worker():
         try:
-            # Setup folders
-            base_dir = "Audio"
+            # 导出目录由 paths.Layout 决定（默认 文档\EpubReader\Audio），不再相对 CWD
+            base_dir = export_dir
             if not os.path.exists(base_dir):
                 os.makedirs(base_dir)
             

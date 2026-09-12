@@ -40,6 +40,7 @@ class JsonStore:
         self._main_is_good = False
         self.loaded_from_bak = False
         self.degraded = False        # 主文件和 .bak 都坏，本次会话用的是默认值
+        self.read_only = False       # 数据目录不可用时由调用方置 True：save() 一律拒绝，不在别处新建
 
     # ---------- 读 ----------
 
@@ -66,6 +67,17 @@ class JsonStore:
             return target
         except OSError:
             return None
+
+    def load_readonly(self):
+        """只读模式：能读就读，读不了就用默认值。不隔离、不恢复、不写任何东西。"""
+        with self._lock:
+            data, why = self._read_valid(self.path)
+            if data is not None:
+                self.data = data
+                return True
+            self.data = self._defaults()
+            self.load_error = None if why == "不存在" else f"只读模式下无法读取数据文件：{why}"
+            return False
 
     def load(self):
         with self._lock:
@@ -121,6 +133,9 @@ class JsonStore:
         """成功 True，失败 False（原因在 last_error）。失败时主文件保证不变。"""
         with self._lock:
             self.last_error = None
+            if self.read_only:
+                self.last_error = "只读模式：数据目录不可用，本次不保存"
+                return False
             problems = self._validate(self.data)
             if problems:
                 # 自己产生的数据都不合法 —— 是代码 bug，不能写盘把好文件盖掉

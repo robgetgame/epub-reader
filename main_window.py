@@ -5,10 +5,13 @@ from epub_parser import EpubParser
 from tts_thread import TTSWorker, NEURAL_VOICES
 from mp3_exporter import run_export_background
 from config_manager import ConfigManager
+import paths
 
 class MainWindow:
-    def __init__(self, root):
+    def __init__(self, root, layout=None):
         self.root = root
+        # layout 为 None 只在旧测试脚本里出现：退回 portable（程序目录）
+        self.layout = layout or paths.resolve_layout(portable=True)
         self.root.title("Native EPUB TTS Reader")
         self.root.geometry("1400x800")
         
@@ -28,7 +31,14 @@ class MainWindow:
         style.configure('TButton', background="#333333", foreground=self.fg_color, borderwidth=1)
         style.map('TButton', background=[('active', '#555555')])
         
-        self.config = ConfigManager()
+        # 先把旧位置的数据搬进数据目录（只复制不删），再读。搬运结果要告诉使用者。
+        self.startup_notes = list(self.layout.notes)
+        if self.layout.config_problem:
+            self.startup_notes.append(self.layout.config_problem)
+        self.startup_notes += paths.migrate_legacy(self.layout)
+        paths.migrate_cache_background(os.path.join(paths.app_root(), "temp_audio"), self.layout.cache)
+
+        self.config = ConfigManager(self.layout.bookmarks_path, read_only=not self.layout.data_ok)
         self.parser = EpubParser()
         
         # EPUB State
@@ -46,16 +56,21 @@ class MainWindow:
         # Start TTS Worker
         self.tts = TTSWorker(
             highlight_callback=lambda idx: self.root.after(0, self._highlight_sentence, idx),
-            chapter_done_callback=lambda: self.root.after(0, self._auto_next_chapter)
+            chapter_done_callback=lambda: self.root.after(0, self._auto_next_chapter),
+            cache_dir=self.layout.cache,
         )
         
         self._build_ui()
         self._setup_keybinds()
         self._load_voices()
 
-        # 数据文件读的时候出过事（从 .bak 恢复 / 两个都坏）必须让人知道，不能静默用默认值
+        # 数据目录不可用 / 迁移发生了什么 / 数据文件读的时候出过事 —— 全部说出来，不静默
+        if self.layout.data_problem:
+            messagebox.showwarning("数据目录", self.layout.data_problem)
         if self.config.load_error:
             messagebox.showwarning("数据文件", self.config.load_error)
+        if self.startup_notes:
+            messagebox.showinfo("数据迁移", chr(10).join(self.startup_notes))
         
         # Resume operations
         self._reload_last_session()
@@ -70,6 +85,10 @@ class MainWindow:
         file_menu.add_cascade(label="Recent Files", menu=self.recent_menu)
         self._update_recent_menu()
         
+        file_menu.add_separator()
+        file_menu.add_command(label="导入旧数据文件...", command=self._import_legacy_dialog)
+        file_menu.add_command(label="打开数据目录", command=lambda: paths.open_in_explorer(self.layout.data))
+        file_menu.add_command(label="打开导出目录", command=lambda: paths.open_in_explorer(self.layout.export))
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self._on_close)
         menubar.add_cascade(label="File", menu=file_menu)
@@ -200,6 +219,26 @@ class MainWindow:
         file_path = filedialog.askopenfilename(filetypes=[("EPUB Files", "*.epub")])
         if file_path:
             self._load_epub(file_path)
+
+    def _import_legacy_dialog(self):
+        """旧目录改名后自动探测不到旧 bookmarks.json，让使用者自己指。导入后要重启才生效 ——
+        内存里的状态、已打开的书、播放线程全绑在旧数据上，热切换不值得冒险。"""
+        src = filedialog.askopenfilename(title="选择旧的 bookmarks.json",
+                                         filetypes=[("JSON", "*.json"), ("All", "*.*")])
+        if not src:
+            return
+        if os.path.exists(self.layout.bookmarks_path):
+            if not messagebox.askyesno("导入旧数据",
+                                       "当前数据文件会先保留为 migrated-current-<时间>.json，"
+                                       "然后用选中的文件替换它。继续？"):
+                return
+        try:
+            notes = paths.import_data_file(self.layout, src)
+        except OSError as e:
+            messagebox.showerror("导入失败", str(e))
+            return
+        messagebox.showinfo("导入旧数据", chr(10).join(notes) + chr(10) + "现在关闭程序，请重新启动。")
+        self._on_close()
 
     def _reload_last_session(self):
         last_file = self.config.config.get("last_file")
@@ -492,7 +531,7 @@ class MainWindow:
             
         def on_complete(success):
             if success:
-                self.root.after(0, lambda: [lbl.config(text="Export completed! Check Audio/ folder.", foreground="lightgreen"), self.root.after(3000, lambda: [win.grab_release(), win.destroy()])])
+                self.root.after(0, lambda: [lbl.config(text="导出完成（文件 → 打开导出目录）", foreground="lightgreen"), self.root.after(3000, lambda: [win.grab_release(), win.destroy()])])
             else:
                 self.root.after(0, lambda: [lbl.config(text="Export failed.", foreground="red"), self.root.after(3000, lambda: [win.grab_release(), win.destroy()])])
                 
@@ -503,7 +542,8 @@ class MainWindow:
             notes_objects=notes_parsed, 
             fallback_voice_id=voice_id, 
             status_callback=on_status_update, 
-            done_callback=on_complete
+            done_callback=on_complete,
+            export_dir=self.layout.export,
         )
 
     def _clear_sandbox(self):

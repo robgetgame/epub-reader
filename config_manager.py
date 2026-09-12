@@ -81,9 +81,13 @@ def validate(data):
 
 
 class ConfigManager:
-    def __init__(self, path=CONFIG_FILE):
+    def __init__(self, path=CONFIG_FILE, read_only=False):
         self.store = JsonStore(path, _defaults, validate)
-        self.store.load()
+        self.store.read_only = read_only
+        if read_only:
+            self.store.load_readonly()
+        else:
+            self.store.load()
         # 文件里缺的键补默认值（老文件没有 chapter_notes 之类）；多出来的键保留
         merged = _defaults()
         merged.update(self.store.data)

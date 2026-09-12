@@ -12,9 +12,8 @@ import pygame
 # Initialize pygame mixer
 pygame.mixer.init()
 
-TEMP_AUDIO_DIR = "temp_audio"
-if not os.path.exists(TEMP_AUDIO_DIR):
-    os.makedirs(TEMP_AUDIO_DIR)
+# 缓存目录由 paths.Layout 决定（%LOCALAPPDATA%/EpubReader/temp_audio），不再是相对 CWD 的字符串
+DEFAULT_CACHE_DIR = "temp_audio"
 
 MAX_CACHE_MB = 500
 
@@ -28,12 +27,13 @@ NEURAL_VOICES = [
 ]
 
 class EdgeTTSDownloader:
-    def __init__(self):
-        pass
+    def __init__(self, cache_dir=DEFAULT_CACHE_DIR):
+        self.cache_dir = cache_dir
+        os.makedirs(cache_dir, exist_ok=True)
         
     def manage_cache(self):
         try:
-            files = [os.path.join(TEMP_AUDIO_DIR, f) for f in os.listdir(TEMP_AUDIO_DIR) if f.endswith('.mp3')]
+            files = [os.path.join(self.cache_dir, f) for f in os.listdir(self.cache_dir) if f.endswith('.mp3')]
             total_size = sum(os.path.getsize(f) for f in files)
             
             if total_size > MAX_CACHE_MB * 1024 * 1024:
@@ -97,7 +97,7 @@ class EdgeTTSDownloader:
         threading.Thread(target=_job, daemon=True).start()
 
 class TTSWorker(threading.Thread):
-    def __init__(self, highlight_callback, chapter_done_callback):
+    def __init__(self, highlight_callback, chapter_done_callback, cache_dir=DEFAULT_CACHE_DIR):
         super().__init__(daemon=True)
         self.cmd_queue = queue.Queue()
         self.stop_event = threading.Event()
@@ -107,7 +107,7 @@ class TTSWorker(threading.Thread):
         self.ready_event = threading.Event()
         self.voices = []
         self.speaker = None
-        self.downloader = EdgeTTSDownloader()
+        self.downloader = EdgeTTSDownloader(cache_dir)
         
         self.start()
         
@@ -147,7 +147,7 @@ class TTSWorker(threading.Thread):
     def _get_cache_path(self, text, voice, rate_str):
         # generate a unique filename
         hash_str = hashlib.md5(f"{text}_{voice}_{rate_str}".encode('utf-8')).hexdigest()
-        return os.path.join(TEMP_AUDIO_DIR, f"{hash_str}.mp3")
+        return os.path.join(self.downloader.cache_dir, f"{hash_str}.mp3")
         
     def _handle_play(self, fallback_voice_id, rate, sentences, start_idx):
         self.stop_event.clear()
