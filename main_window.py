@@ -4,7 +4,9 @@
 - 笔记身份 displayed_note = (book_key, chapter_key)：右栏现在显示的是谁的笔记。
   保存只保存到它，切换只经过 _show_note()，修改只经过 _mutate_note() / 用户敲键盘。
   没开书时 book_key = "__scratch__"。这一条解决 B1 的三种串笔记。
-- 播放 session：第 4 步做。现在还是共享 stop_event 的旧 TTSWorker。
+- 播放 session：每次 play() 一个 id，worker 的消息都带 id，只认 active_session 的（§2.2 / A.3）。
+  done 是终态，按钮靠它复位；跳过的句子立即进状态栏，也累计进 skipped_log。
+  章末自动播放带 (book_key, chapter, nav_token) 三重身份，切过章就作废。
 - AI 请求身份：第 8 步做。
 
 书签存 (章序号, 字符偏移)，恢复时高亮并回写（B4）。
@@ -12,6 +14,7 @@
 """
 
 import os
+import queue
 import re
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -112,15 +115,22 @@ class MainWindow:
         self.note_sentence_idx = 0
         self.is_playing_sandbox = False
 
-        self.tts = TTSWorker(
-            highlight_callback=lambda idx: self.root.after(0, self._highlight_sentence, idx),
-            chapter_done_callback=lambda: self.root.after(0, self._auto_next_chapter),
-            cache_dir=self.layout.cache,
-        )
+        # 播放 session（§2.2）
+        self.active_session = None      # 当前认的 session id；None = 没在播
+        self.active_target = None       # "epub" | "note"
+        self.nav_token = 0              # 每次切章 +1；延迟自动播放要对上号
+        self._auto_after_id = None
+        self.skipped_log = []           # (章序号, 句序号, 原因)，状态栏可点开
+
+        self.events = queue.Queue()
+        self.tts = TTSWorker(self.events, cache_dir=self.layout.cache)
+        self.sapi_voices = []
+        self.voices_ready = False
 
         self._build_ui()
         self._setup_keybinds()
         self._load_voices()
+        self.root.after(50, self._drain_events)
 
         # 数据目录不可用 / 迁移发生了什么 / 数据文件读的时候出过事 —— 全部说出来，不静默
         if self.layout.data_problem:
@@ -225,7 +235,9 @@ class MainWindow:
         self.speed_slider.bind("<ButtonRelease-1>", self._on_settings_change)
 
         self.status_var = tk.StringVar(value="")
-        ttk.Label(self.root, textvariable=self.status_var, anchor=tk.W).pack(fill=tk.X, padx=10, pady=(0, 4))
+        status = ttk.Label(self.root, textvariable=self.status_var, anchor=tk.W, cursor="hand2")
+        status.pack(fill=tk.X, padx=10, pady=(0, 4))
+        status.bind("<Button-1>", lambda e: self._show_skipped_log())
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -267,7 +279,8 @@ class MainWindow:
             self.recent_menu.add_command(label=os.path.basename(path), command=lambda p=path: self._load_epub(p))
 
     def _load_voices(self):
-        voices = self.tts.get_voices()
+        """神经音色立刻可选；本机语音等 worker 发 ready 再补进来（B8：启动不等 COM）。"""
+        voices = [(nv, nv + " (High Quality Online Neural)") for nv in NEURAL_VOICES] + list(self.sapi_voices)
         self.voice_map = {name: vid for vid, name in voices}
         self.voice_combo['values'] = list(self.voice_map.keys())
         saved_voice = self.config.config.get("voice_id")
@@ -279,14 +292,18 @@ class MainWindow:
                     break
         if selected_name:
             self.voice_combo.set(selected_name)
-        elif voices:
+        elif voices and not self.voice_combo.get():
             self.voice_combo.set(voices[0][1])
+        self._push_settings()
+
+    def _push_settings(self):
+        voice_id, rate = self._current_voice_and_rate()
+        self.tts.set_settings(voice_id, rate)
 
     def _on_settings_change(self, event=None):
-        voice_id = self.voice_map.get(self.voice_var.get())
-        rate = int(float(self.speed_var.get()))
+        voice_id, rate = self._current_voice_and_rate()
         self.config.set_voice_and_rate(voice_id, rate)
-        self.tts.set_rate(rate)
+        self.tts.set_settings(voice_id, rate)   # 播放中也生效：worker 每句重读
 
     def _current_voice_and_rate(self):
         return self.voice_map.get(self.voice_var.get()), int(float(self.speed_var.get()))
@@ -446,6 +463,7 @@ class MainWindow:
         if not self._show_note(self._note_id_for_chapter(index)):
             return False
 
+        self.nav_token += 1
         self.current_chapter_idx = index
         self.chapter_text, self.current_sentences = self.parser.get_chapter_sentences(index)
         self.current_book_name = os.path.basename(self.book_key).replace(".epub", "")
@@ -514,16 +532,21 @@ class MainWindow:
             self.current_sentence_idx = sel
         if self.current_sentence_idx >= len(self.current_sentences):
             self.current_sentence_idx = 0
+        self._cancel_auto_next()
         self.is_playing = True
         self.is_playing_sandbox = False
         self.play_btn.config(text="Pause")
-        voice_id, rate = self._current_voice_and_rate()
-        self.tts.play(voice_id, rate, [s.text for s in self.current_sentences], self.current_sentence_idx)
+        self._push_settings()
+        self.active_target = "epub"
+        self.active_session = self.tts.play([s.text for s in self.current_sentences],
+                                            self.current_sentence_idx, target="epub")
 
     def _stop_play(self):
+        self._cancel_auto_next()
         if self.is_playing:
             self.is_playing = False
             self.play_btn.config(text="Play")
+            self.active_session = None
             self.tts.stop()
             self._save_epub_bookmark()
 
@@ -562,10 +585,12 @@ class MainWindow:
         if self.note_sentence_idx >= len(self.note_sentences):
             self.note_sentence_idx = 0
 
+        self._cancel_auto_next()
         self.is_playing_sandbox = True
         self.sandbox_play_btn.config(text="Pause Note")
-        voice_id, rate = self._current_voice_and_rate()
-        self.tts.play(voice_id, rate, self.note_sentences, self.note_sentence_idx)
+        self._push_settings()
+        self.active_target = "note"
+        self.active_session = self.tts.play(self.note_sentences, self.note_sentence_idx, target="note")
 
     def _render_note_tags(self):
         """只加 tag，不改文本。用 "1.0 + N chars" 定位：Tk 的 chars 按字符数，跟 Python 偏移一致
@@ -577,6 +602,7 @@ class MainWindow:
         if self.is_playing_sandbox:
             self.is_playing_sandbox = False
             self.sandbox_play_btn.config(text="Play Note")
+            self.active_session = None
             self.tts.stop()
             if self.displayed_note and self.note_sentences:
                 idx = min(self.note_sentence_idx, len(self.note_sentences) - 1)
@@ -715,7 +741,8 @@ class MainWindow:
             chap_name = f"Chapter {self.current_chapter_idx + 1}"
 
         def on_status_update(status_text):
-            self.root.after(0, lambda: lbl.config(text=status_text))
+            # 使用者可能已经把导出窗口关了，别往销毁的控件上写
+            self.root.after(0, lambda: win.winfo_exists() and lbl.config(text=status_text))
 
         def on_complete(success):
             if success:
@@ -767,30 +794,116 @@ class MainWindow:
             if save:
                 self._save_epub_bookmark()
 
-    def _highlight_sentence(self, index):
-        # 第 4 步之前：还是靠「现在谁在播」判断该高亮哪个区。旧 session 的迟到回调会串区（B5），第 4 步修。
-        if self.is_playing_sandbox:
-            self.note_sentence_idx = index
-            self.sandbox_area.tag_remove("highlight", "1.0", tk.END)
-            if index < len(self.note_sentences):
-                tag = f"sentence_{index}"
-                try:
-                    self.sandbox_area.tag_add("highlight", f"{tag}.first", f"{tag}.last")
-                except tk.TclError:
-                    return
-                self._see_line_centered(self.sandbox_area, tag)
-        elif self.is_playing:
-            self._highlight_epub(index, save=True)
+    # ---------- worker 事件（§2.2） ----------
 
-    def _auto_next_chapter(self):
-        if self.is_playing:
-            self.is_playing = False
-            self.play_btn.config(text="Play")
+    def _drain_events(self):
+        if getattr(self, "_closed", False):
+            return
+        try:
+            while True:
+                msg = self.events.get_nowait()
+                try:
+                    self._handle_event(msg)
+                except Exception as e:     # 一条消息处理炸了不能把定时器炸掉
+                    print("event error:", msg[0], e)
+        except queue.Empty:
+            pass
+        self.root.after(50, self._drain_events)
+
+    def _handle_event(self, msg):
+        kind = msg[0]
+        if kind == "ready":
+            self.sapi_voices = list(msg[1])
+            self.voices_ready = True
+            self._load_voices()
+            return
+        if kind == "init_error":
+            self._set_status(msg[1] + "（神经音色仍可用）")
+            return
+        if kind == "audio_error":
+            self._set_status(msg[1])
+            messagebox.showerror("音频输出", msg[1] + chr(10) + "神经音色无法播放；本机语音不受影响。")
+            return
+
+        sid = msg[1]
+        if sid != self.active_session:
+            return      # 旧 session 的迟到消息：丢（B5）
+        if kind == "highlight":
+            idx = msg[2]
+            if self.active_target == "note":
+                self._highlight_note(idx)
+            else:
+                self._highlight_epub(idx, save=True)
+        elif kind == "skipped":
+            _, _, idx, reason = msg
+            self.skipped_log.append((self.current_chapter_idx if self.active_target == "epub" else -1, idx, reason))
+            self._set_status(f"第 {idx + 1} 句没读：{reason}（点这里看全部）")
+        elif kind == "done":
+            _, _, status, skipped = msg
+            self._on_session_done(status, skipped)
+
+    def _highlight_note(self, index):
+        self.note_sentence_idx = index
+        self.sandbox_area.tag_remove("highlight", "1.0", tk.END)
+        if index < len(self.note_sentences):
+            tag = f"sentence_{index}"
+            try:
+                self.sandbox_area.tag_add("highlight", f"{tag}.first", f"{tag}.last")
+            except tk.TclError:
+                return
+            self._see_line_centered(self.sandbox_area, tag)
+
+    def _on_session_done(self, status, skipped):
+        """终态：按钮复位。只有 finished 才自动翻页；cancelled / failed 停在原地（A.3）。"""
+        target = self.active_target
+        self.active_session = None
+        if target == "note":
+            self.is_playing_sandbox = False
+            self.sandbox_play_btn.config(text="Play Note")
+            if self.displayed_note and self.note_sentences:
+                idx = min(self.note_sentence_idx, len(self.note_sentences) - 1)
+                self.config.set_note_position(*self.displayed_note, self.note_sentences[idx]["start"])
+            return
+        self.is_playing = False
+        self.play_btn.config(text="Play")
+        self._save_epub_bookmark()
+        if status == "failed":
+            self._set_status("播放中断：" + (skipped[-1][1] if skipped else "未知错误"))
+            return
+        if status == "finished":
+            if skipped:
+                self._set_status(f"本章读完，跳过了 {len(skipped)} 句（点这里看）")
             if self.current_chapter_idx < len(self.parser.chapters) - 1:
-                if self._load_chapter(self.current_chapter_idx + 1):
-                    self.root.after(500, self._start_play)
-        elif self.is_playing_sandbox:
-            self._stop_play_sandbox()
+                self._schedule_auto_next()
+
+    def _schedule_auto_next(self):
+        """章末自动翻页。带三重身份：切了章、换了书、又手动播了别的，都作废。"""
+        self._cancel_auto_next()
+        ident = (self.book_key, self.current_chapter_idx + 1, self.nav_token)
+        self._auto_after_id = self.root.after(500, self._auto_next, ident)
+
+    def _cancel_auto_next(self):
+        if self._auto_after_id is not None:
+            try:
+                self.root.after_cancel(self._auto_after_id)
+            except tk.TclError:
+                pass
+            self._auto_after_id = None
+
+    def _auto_next(self, ident):
+        self._auto_after_id = None
+        book_key, next_chapter, token = ident
+        if book_key != self.book_key or token != self.nav_token or self.active_session is not None:
+            return
+        if self._load_chapter(next_chapter):
+            self._start_play()
+
+    def _show_skipped_log(self):
+        if not self.skipped_log:
+            return
+        lines = [f"第 {ch + 1} 章 第 {idx + 1} 句：{reason}" if ch >= 0 else f"笔记 第 {idx + 1} 句：{reason}"
+                 for ch, idx, reason in self.skipped_log[-50:]]
+        messagebox.showinfo("没读的句子", chr(10).join(lines))
 
     def _on_close(self):
         self._stop_play()
@@ -799,5 +912,7 @@ class MainWindow:
             if not messagebox.askyesno("笔记没保存",
                                        f"{self.config.last_error}\n\n仍然退出？未保存的笔记会丢。"):
                 return
+        self._cancel_auto_next()
+        self._closed = True
         self.tts.quit()
         self.root.destroy()

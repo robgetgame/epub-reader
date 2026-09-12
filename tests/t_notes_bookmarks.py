@@ -24,23 +24,27 @@ fake_tts.NEURAL_VOICES = ["zh-CN-YunyangNeural"]
 
 
 class FakeTTS:
-    def __init__(self, highlight_callback, chapter_done_callback, cache_dir=None):
-        self.highlight_callback = highlight_callback
-        self.chapter_done_callback = chapter_done_callback
+    """第 4 步接口：events 队列、play 返回 session id、set_settings。"""
+
+    def __init__(self, events, cache_dir=None, downloader=None):
+        self.events = events
         self.plays = []
         self.stops = 0
+        self.next_id = 1
+        self.settings = None
+        events.put(("ready", [("sapi-1", "SAPI One")]))
 
-    def get_voices(self):
-        return [("zh-CN-YunyangNeural", "Yunyang"), ("sapi-1", "SAPI One")]
+    def set_settings(self, voice_id, rate):
+        self.settings = (voice_id, rate)
 
-    def play(self, voice_id, rate, sentences, start_idx=0):
-        self.plays.append((voice_id, rate, sentences, start_idx))
+    def play(self, sentences, start_idx=0, target="epub", end_idx=None):
+        sid = self.next_id
+        self.next_id += 1
+        self.plays.append((sid, target, sentences, start_idx))
+        return sid
 
     def stop(self):
         self.stops += 1
-
-    def set_rate(self, rate):
-        pass
 
     def quit(self):
         pass
@@ -127,10 +131,15 @@ def new_app(v1_data=None, v2_data=None):
             json.dump(v1_data if v1_data is not None else v2_data, f, ensure_ascii=False)
     for w in tk_root.winfo_children():
         w.destroy()
+    if new_app.prev is not None:
+        new_app.prev._closed = True      # 停掉上一个实例的事件定时器
     app = MainWindow(tk_root, layout)
+    new_app.prev = app
     tk_root.update()
     return app, layout
 
+
+new_app.prev = None
 
 # ---------- 1. 解析器：章 = 目录条目 ----------
 print("1. 解析器")
@@ -204,7 +213,7 @@ sent = app.tts.plays[-1][2]
 check([s["text"] for s in sent] == ["第一句。", "第二句！", "第三句？"], f"句子：{[s['text'] for s in sent]}")
 check(sent[0]["voice_id"] == "zh-CN-XiaoxiaoNeural" and sent[1]["voice_id"] is None, "音色标签解析")
 check(app.sandbox_area.get("sentence_1.first", "sentence_1.last") == "第二句！", "标签打在原文正确位置")
-app._highlight_sentence(1)
+app.events.put(("highlight", app.active_session, 1)); app._drain_events()
 check("highlight" in app.sandbox_area.tag_names("sentence_1.first"), "高亮第 1 句")
 # 播放中编辑 → 立即停
 app.sandbox_area.insert(tk.END, "x")
@@ -216,7 +225,7 @@ app._mutate_note(note, source="test")
 # ---------- 7. 笔记位置按 NoteId 存 ----------
 print("7. 笔记位置")
 app._start_play_sandbox()
-app._highlight_sentence(2)
+app.events.put(("highlight", app.active_session, 2)); app._drain_events()
 app._stop_play_sandbox()
 check(app.config.get_note_position(*app.displayed_note) == sent[2]["start"], "停下时存位置")
 app._start_play_sandbox()
