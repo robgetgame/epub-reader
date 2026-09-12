@@ -151,6 +151,7 @@ class MainWindow:
         self.nav_token = 0              # 每次切章 +1；延迟自动播放要对上号
         self._auto_after_id = None
         self.skipped_log = []           # (章序号, 句序号, 原因)，状态栏可点开
+        self.selection_end = None       # 选区播放的末句序号；None = 整章
 
         self.events = queue.Queue()
         self.tts = TTSWorker(self.events, cache_dir=self.layout.cache)
@@ -735,20 +736,41 @@ class MainWindow:
 
     # ---------- 正文播放 ----------
 
-    def _selected_sentence_idx(self, widget):
-        """用户选中了某句就从那句开始。返回 None 表示没选。"""
+    def _selected_range(self, widget, sentences):
+        """选区覆盖的句子范围 (start_idx, end_idx)，含两端；没选返回 None。
+        用字符偏移算：控件里的文本就是原文（第 3 步起按原样渲染），偏移和句子偏移是同一坐标系。
+        选区落在句子之间的空白上也能算出来：起点取第一个 end > 选区起点 的句子，终点取最后一个 start < 选区终点 的。"""
+        if not sentences:
+            return None
         try:
             ranges = widget.tag_ranges("sel")
             if not ranges:
                 return None
-            for tag in widget.tag_names(ranges[0]):
-                if tag.startswith("sentence_"):
-                    widget.tag_remove("sel", "1.0", tk.END)
-                    return int(tag.split("_")[1])
+            sel_start = widget.count("1.0", ranges[0], "chars")[0]
+            sel_end = widget.count("1.0", ranges[1], "chars")[0]
             widget.tag_remove("sel", "1.0", tk.END)
-        except (tk.TclError, ValueError):
-            pass
-        return None
+        except (tk.TclError, TypeError, IndexError):
+            return None
+        if sel_end <= sel_start:
+            return None
+
+        def s_start(x):
+            return x["start"] if isinstance(x, dict) else x.start
+
+        def s_end(x):
+            return x["end"] if isinstance(x, dict) else x.end
+
+        start_idx = next((i for i, x in enumerate(sentences) if s_end(x) > sel_start), None)
+        end_idx = next((i for i in range(len(sentences) - 1, -1, -1) if s_start(sentences[i]) < sel_end), None)
+        if start_idx is None or end_idx is None or end_idx < start_idx:
+            return None
+        return start_idx, end_idx
+
+    def _selected_sentence_idx(self, widget):
+        """兼容旧调用：只要起点。"""
+        sentences = self.current_sentences if widget is self.text_area else self.note_sentences
+        r = self._selected_range(widget, sentences)
+        return None if r is None else r[0]
 
     def _toggle_play(self):
         if self.is_playing_sandbox:
@@ -761,9 +783,12 @@ class MainWindow:
             self._start_play()
 
     def _start_play(self):
-        sel = self._selected_sentence_idx(self.text_area)
+        """有选区：只读选区、读完停、不翻页，下次 Play 从选区末尾继续（D13 / AGENTS.md）。
+        没选区：从当前位置（书签）读到章末，读完自动翻页。"""
+        end_idx = None
+        sel = self._selected_range(self.text_area, self.current_sentences)
         if sel is not None:
-            self.current_sentence_idx = sel
+            self.current_sentence_idx, end_idx = sel
         if self.current_sentence_idx >= len(self.current_sentences):
             self.current_sentence_idx = 0
         self._cancel_auto_next()
@@ -772,8 +797,9 @@ class MainWindow:
         self.play_btn.configure(text="⏸ 暂停")
         self._push_settings()
         self.active_target = "epub"
+        self.selection_end = end_idx
         self.active_session = self.tts.play([{"text": s.text, "spoken": s.spoken} for s in self.current_sentences],
-                                            self.current_sentence_idx, target="epub")
+                                            self.current_sentence_idx, target="epub", end_idx=end_idx)
 
     def _stop_play(self):
         self._cancel_auto_next()
@@ -1151,10 +1177,19 @@ class MainWindow:
             return
         self.is_playing = False
         self.play_btn.configure(text="▶ 播放")
-        self._save_epub_bookmark()
+        selection_end = getattr(self, "selection_end", None)
+        self.selection_end = None
         if status == "failed":
+            self._save_epub_bookmark()
             self._set_status("播放中断：" + (skipped[-1][1] if skipped else "未知错误"))
             return
+        if status == "finished" and selection_end is not None:
+            # 选区读完：光标放到选区之后那句，不翻页
+            self.current_sentence_idx = min(selection_end + 1, len(self.current_sentences) - 1)
+            self._highlight_epub(self.current_sentence_idx, save=True)
+            self._set_status("选区读完" + (f"，跳过了 {len(skipped)} 句（点这里看）" if skipped else ""))
+            return
+        self._save_epub_bookmark()
         if status == "finished":
             if skipped:
                 self._set_status(f"本章读完，跳过了 {len(skipped)} 句（点这里看）")

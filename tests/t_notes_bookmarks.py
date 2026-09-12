@@ -306,6 +306,33 @@ check([x["text"] for x in r] == ["不认识的标签。", "男声。", "尾巴"]
       and r[1]["voice_id"] == "zh-CN-YunxiNeural" and r[2]["voice_id"] is None, "不认识的标签不改音色、不出现在句子里")
 check(parse_note_text("", EpubParser.split_into_sentences) == [], "空文本")
 
+# ---------- 13. 选区播放（D13）：只读选区、读完停、不翻页、下次从选区末尾继续 ----------
+print("13. 选区播放")
+app._load_epub(book1)
+app._load_chapter(1)
+ss = app.current_sentences
+# 选区从第 2 句中间到第 3 句中间
+app.text_area.config(state=tk.NORMAL)
+app.text_area.tag_add("sel", f"1.0 + {ss[2].start + 2} chars", f"1.0 + {ss[3].start + 2} chars")
+app.text_area.config(state=tk.DISABLED)
+app._start_play()
+sid, target, sent, start = app.tts.plays[-1]
+check(start == 2 and app.selection_end == 3, f"从第 2 句读到第 3 句：start={start} end={app.selection_end}")
+app.events.put(("done", sid, "finished", [])); app._drain_events()
+check(not app.is_playing and app.current_sentence_idx == 4, f"读完停在选区之后（第 4 句）：{app.current_sentence_idx}")
+check(app._auto_after_id is None, "没有排自动翻页")
+check(read_json(layout.bookmarks_path)["bookmarks"][book1]["offset"] == ss[4].start, "书签在第 4 句起点")
+app._start_play()
+check(app.tts.plays[-1][3] == 4 and app.selection_end is None, "再按播放：从第 4 句读到章末（无选区）")
+app.events.put(("done", app.tts.plays[-1][0], "finished", [])); app._drain_events()
+check(app._auto_after_id is not None, "整章读完才排自动翻页")
+app._cancel_auto_next()
+# 选区落在句子之间的空白 / 选区只在一句内
+app.text_area.tag_add("sel", f"1.0 + {ss[1].start} chars", f"1.0 + {ss[1].end} chars")
+check(app._selected_range(app.text_area, ss) == (1, 1), "整句选区 → (1, 1)")
+app.text_area.tag_add("sel", f"1.0 + {ss[0].end} chars", f"1.0 + {ss[1].start} chars")
+check(app._selected_range(app.text_area, ss) is None, "只选到句间空白 → None")
+
 tk_root.destroy()
 shutil.rmtree(root_dir, ignore_errors=True)
 print()
