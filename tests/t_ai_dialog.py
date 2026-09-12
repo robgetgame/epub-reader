@@ -211,7 +211,7 @@ dlg2._on_close()
 app.ai_cfg["api_key"] = ""
 app._open_ai_dialog()
 dlg3 = app.ai_dialog
-check(dlg3.gen_btn.cget("state") == "disabled" and "API_KEY" in dlg3.state_var.get(), "没 key：按钮禁用并说明")
+check(dlg3.gen_btn.cget("state") == "disabled" and "没有设置" in dlg3.state_var.get(), "没 key：按钮禁用并说明")
 dlg3._on_close()
 
 H.cleanup()
