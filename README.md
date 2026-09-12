@@ -27,10 +27,14 @@ py -3.13 -m venv .venv
 [Environment]::SetEnvironmentVariable("OPENROUTER_KEY", "你的key", "User")
 ```
 
-- 默认模型 `deepseek/deepseek-v4.1-flash`。`config.json` 可改：
+- 默认模型 `deepseek/deepseek-v4.1-flash`（$0.15 / $0.60 每百万 tokens，全天一价，一章讲解约 $0.0016）。
+  也可以走 DeepSeek 直连：`config.json` 里 `"provider": "deepseek"`，key 放 `DEEPSEEK_API_KEY`。
+  注意直连在 UTC 01–04、06–10 工作日（东部时间晚 21–00、凌晨 02–06）是全价 $0.30 / $1.20，其余时段半价与 OpenRouter 持平；
+  直连不返回费用，程序按官网价估算并标 ≈。`config.json` 可改：
 
 ```json
 {
+  "provider": "openrouter",
   "model": "deepseek/deepseek-v4.1-flash",
   "history_turns": 10,
   "data_dir": "C:\Users\你\Google Drive\EpubReader",

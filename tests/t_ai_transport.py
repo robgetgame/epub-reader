@@ -171,9 +171,9 @@ check(done[2] == "failed" and "HTTP 401" in done[6] and "SECRET123" not in done[
 c2 = OpenRouterClient("m", "", provider="openrouter", base_url="https://openrouter.ai/api/v1")
 done, _, _ = run_stream(c2, None)
 check(done[2] == "failed" and "OPENROUTER_KEY" in done[6], "没 key 直接失败并说明（openrouter）")
-c3 = OpenRouterClient("deepseek-flash", "")
+c3 = OpenRouterClient("deepseek-flash", "", provider="deepseek", base_url="https://api.deepseek.com")
 done, _, _ = run_stream(c3, None)
-check(done[2] == "failed" and "DEEPSEEK_API_KEY" in done[6], "没 key 直接失败并说明（deepseek 默认）")
+check(done[2] == "failed" and "DEEPSEEK_API_KEY" in done[6], "没 key 直接失败并说明（deepseek）")
 
 # ---------- 9. base_url 限制 / 重定向 ----------
 print("9. base_url")
@@ -258,10 +258,12 @@ os.environ["OPENROUTER_KEY"] = "  sk-test  "
 os.environ["DEEPSEEK_API_KEY"] = "sk-ds"
 cfg = load_ai_config({"provider": "openrouter", "model": "x/y", "history_turns": -1})
 check(cfg["model"] == "x/y" and cfg["history_turns"] == 10 and cfg["api_key"] == "sk-test" and cfg["base_url"] == "https://openrouter.ai/api/v1", f"配置读取 openrouter：{cfg}")
+cfg = load_ai_config({"provider": "deepseek"})
+check(cfg["provider"] == "deepseek" and cfg["model"] == "deepseek-flash" and cfg["api_key"] == "sk-ds" and cfg["base_url"] == "https://api.deepseek.com" and cfg["key_env"] == "DEEPSEEK_API_KEY", f"deepseek 配置：{cfg}")
 cfg = load_ai_config({})
-check(cfg["provider"] == "deepseek" and cfg["model"] == "deepseek-flash" and cfg["api_key"] == "sk-ds" and cfg["base_url"] == "https://api.deepseek.com" and cfg["key_env"] == "DEEPSEEK_API_KEY", f"默认 deepseek：{cfg}")
+check(cfg["provider"] == "openrouter" and cfg["model"] == "deepseek/deepseek-v4.1-flash" and cfg["key_env"] == "OPENROUTER_KEY", f"默认 openrouter：{cfg}")
 cfg = load_ai_config({"provider": "nonsense"})
-check(cfg["provider"] == "deepseek", "未知 provider 回默认")
+check(cfg["provider"] == "openrouter", "未知 provider 回默认")
 
 print("13. DeepSeek 费用估算 / 请求体")
 import time as _t
@@ -287,7 +289,7 @@ def opener(req, timeout=None):
     import json as _j
     captured["body"] = _j.loads(req.data.decode("utf-8")); captured["url"] = req.full_url
     return _R()
-cd = OpenRouterClient("deepseek-flash", "k")
+cd = OpenRouterClient("deepseek-flash", "k", provider="deepseek", base_url="https://api.deepseek.com")
 cd._opener = type("O", (), {"open": staticmethod(opener)})()
 run_stream(cd, None)
 b = captured["body"]

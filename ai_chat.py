@@ -23,8 +23,9 @@ import urllib.request
 from dataclasses import dataclass, field
 
 # 两家都是 OpenAI 兼容格式，差别只在：地址、key 的环境变量、默认模型、关思考的参数、费用字段。
-# 2026-09-12 使用者拍板默认走 DeepSeek 直连（D27）。价格（DeepSeek 官网，USD / 百万 tokens）：
-#   deepseek-flash 高峰 $0.30 入 / $1.20 出，非高峰半价；高峰 = UTC 01–04、06–10 工作日。OpenRouter 全天 $0.15 / $0.60。
+# 2026-09-12 使用者拍板：默认 OpenRouter（D27）。DeepSeek 直连保留为可选（config.json "provider": "deepseek"）。
+# 价格（USD / 百万 tokens）：OpenRouter 全天 $0.15 入 / $0.60 出；DeepSeek 官网 deepseek-flash 高峰 $0.30 / $1.20、
+# 非高峰半价，高峰 = UTC 01–04、06–10 工作日（东部时间晚 21–00、凌晨 02–06）。晚上读书 OpenRouter 便宜一半。
 PROVIDERS = {
     "deepseek": {
         "base_url": "https://api.deepseek.com",
@@ -43,7 +44,7 @@ PROVIDERS = {
         "usage_opt": {"usage": {"include": True}},
     },
 }
-DEFAULT_PROVIDER = "deepseek"
+DEFAULT_PROVIDER = "openrouter"
 DEFAULT_MODEL = PROVIDERS[DEFAULT_PROVIDER]["model"]
 DEFAULT_BASE_URL = PROVIDERS[DEFAULT_PROVIDER]["base_url"]
 
