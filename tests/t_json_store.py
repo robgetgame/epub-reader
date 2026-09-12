@@ -157,26 +157,39 @@ check(s.save() is False and "不合法" in s.last_error, f"拒绝：{s.last_erro
 check(read(p)["speech_rate"] == 5, "主文件没动")
 shutil.rmtree(d)
 
-# ---------- 7. ConfigManager 旧 API 不变 ----------
+# ---------- 7. ConfigManager schema 2 API ----------
 print("7. ConfigManager API")
 d = fresh_dir()
 p = os.path.join(d, "bookmarks.json")
 cm = ConfigManager(p)
 check(cm.add_recent_file("X.epub") is True, "add_recent_file 返回 True")
-cm.set_bookmark("X.epub", 3, 4)
-cm.save_chapter_note("X.epub", 3, "笔记")
-cm.save_sandbox("草稿", 2)
+cm.set_bookmark("X.epub", 3, 444)
+cm.set_note("X.epub", 3, "笔记")
+cm.set_note("__scratch__", 0, "草稿")
+cm.set_note_position("X.epub", 3, 12)
 cm2 = ConfigManager(p)
-check(cm2.get_bookmark("X.epub") == {"chapter_idx": 3, "sentence_idx": 4}, "书签读回")
-check(cm2.load_chapter_note("X.epub", 3) == "笔记", "笔记读回")
-check(cm2.load_sandbox() == ("草稿", 2), "sandbox 读回")
+check(cm2.get_bookmark("X.epub") == (3, 444), "书签读回")
+check(cm2.get_note("X.epub", 3) == "笔记" and cm2.get_note("__scratch__", 0) == "草稿", "笔记读回")
+check(cm2.get_note_position("X.epub", 3) == 12, "笔记位置读回")
 check(cm2.config["recent_files"] == ["X.epub"] and cm2.config["last_file"] == "X.epub", "recent 读回")
-# 缺键的老文件：补默认值，多余键保留
+check(cm2.legacy() is None and not cm2.migrated_now, "v2 文件没有 migrated_v1")
+cm2.set_note("X.epub", 3, "")
+check("X.epub" not in read(p)["notes"], "空笔记删条目")
+# 缺键的 v2 文件：补默认值，多余键保留
 with open(p, "w", encoding="utf-8") as f:
-    json.dump({"recent_files": [], "future_key": {"a": 1}}, f)
+    json.dump({"schema": 2, "recent_files": [], "future_key": {"a": 1}}, f)
 cm3 = ConfigManager(p)
-check(cm3.config["chapter_notes"] == {} and cm3.config["speech_rate"] == 200, "缺键补默认")
+check(cm3.config["notes"] == {} and cm3.config["speech_rate"] == 200, "缺键补默认")
 check(cm3.config["future_key"] == {"a": 1}, "未知键保留")
+# v1 → v2
+with open(p, "w", encoding="utf-8") as f:
+    json.dump({"recent_files": ["A"], "bookmarks": {"A": {"chapter_idx": 1, "sentence_idx": 2}},
+               "sandbox_text": "s", "chapter_notes": {"A": {"1": "n"}}}, f)
+cm4 = ConfigManager(p)
+check(cm4.migrated_now and cm4.legacy()["chapter_notes"] == {"A": {"1": "n"}}, "v1 迁移进 migrated_v1")
+check(cm4.v1_backup and os.path.exists(cm4.v1_backup), f"v1 原件另存：{os.path.basename(cm4.v1_backup or '')}")
+check(read(p)["schema"] == 2, "主文件已是 v2")
+check(validate({"schema": 3}) == ["不认识的 schema 3"], "未知 schema 拒绝")
 shutil.rmtree(d)
 
 # ---------- 8. 真实数据文件（只读）能通过 validate ----------

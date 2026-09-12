@@ -1,26 +1,38 @@
-"""bookmarks.json 的读写。
+"""bookmarks.json 的读写，schema 2。
 
-第 1 步（2026-09-12）：底层换成 json_store.JsonStore（原子写 + .bak + 坏文件隔离），
-**公开 API 和字段一个不改** —— UI 还在用 sandbox_text 那套，schema 2 在第 3 步一起换。
+schema 2（第 3 步，2026-09-12）跟 v1 的差别：
+- 书签存 (chapter, offset)：chapter 是目录条目序号，offset 是章内字符偏移。
+  v1 存的是 (spine 文件序号, 句序号)，断句算法一换句序号就没意义了。
+- 笔记按 (book_key, chapter_key) 存在 notes 里；没开书时 book_key = "__scratch__"。
+  v1 的全局 sandbox_text 取消 —— 它和 chapter_notes 互相覆盖是 B1 的根因。
+- note_positions：笔记的朗读位置，按 (book_key, chapter_key) 存字符偏移。
+- v1 的 bookmarks / chapter_notes / sandbox_text 整个搬进 migrated_v1 **原样保留**，不自动换算
+  （D18：一本书、十几条笔记，为它写通用换算器不值；使用者从「旧笔记」菜单手动复制）。
 """
 
 import os
+import time
 
 from json_store import JsonStore
 
 CONFIG_FILE = "bookmarks.json"
+SCHEMA = 2
+SCRATCH_BOOK = "__scratch__"
 
 
 def _defaults():
     return {
-        "recent_files": [],          # 文件路径列表，最近的在前
+        "schema": SCHEMA,
+        "recent_files": [],
         "last_file": None,
-        "bookmarks": {},             # file_path -> {"chapter_idx": int, "sentence_idx": int}
         "voice_id": None,
         "speech_rate": 200,
-        "sandbox_text": "",
-        "sandbox_sentence_idx": 0,
-        "chapter_notes": {},         # file_path -> {"chapter_idx(str)": text}
+        "bookmarks": {},        # book_key -> {"chapter": int, "offset": int}
+        "notes": {},            # book_key -> {chapter_key: text}
+        "note_positions": {},   # book_key -> {chapter_key: offset}
+        "book_meta": {},        # book_key -> {"kind": ..., "language": ..., "kind_source": ...}（第 8 步用）
+        "ai_usage": {},         # 第 8 步用
+        "migrated_v1": None,    # v1 数据原样；None 表示这个文件不是从 v1 来的
     }
 
 
@@ -28,10 +40,12 @@ def _is_nonneg_int(v):
     return isinstance(v, int) and not isinstance(v, bool) and v >= 0
 
 
+def _is_str_dict_of_str(d):
+    return isinstance(d, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in d.items())
+
+
 def validate(data):
-    """只查形状，不查语义（比如章号有没有越界 —— 那要开书才知道）。
-    未知的顶层键放过：schema 2 会加键，旧版本程序读到新文件不能当成坏文件。
-    返回问题列表，空表示合法。"""
+    """只查形状。未知顶层键放过。既接受 v1 也接受 v2 —— v1 文件读进来后由 ConfigManager 迁移。"""
     problems = []
     if not isinstance(data, dict):
         return ["顶层不是对象"]
@@ -39,11 +53,28 @@ def validate(data):
     rf = data.get("recent_files", [])
     if not isinstance(rf, list) or not all(isinstance(p, str) for p in rf):
         problems.append("recent_files 不是字符串列表")
-
     lf = data.get("last_file")
     if lf is not None and not isinstance(lf, str):
         problems.append("last_file 不是字符串")
+    vid = data.get("voice_id")
+    if vid is not None and not isinstance(vid, str):
+        problems.append("voice_id 不是字符串")
+    rate = data.get("speech_rate", 200)
+    if not isinstance(rate, (int, float)) or isinstance(rate, bool):
+        problems.append("speech_rate 不是数字")
 
+    schema = data.get("schema")
+    if schema is None:
+        problems += _validate_v1(data)
+    elif schema == SCHEMA:
+        problems += _validate_v2(data)
+    else:
+        problems.append(f"不认识的 schema {schema!r}")
+    return problems
+
+
+def _validate_v1(data):
+    problems = []
     bm = data.get("bookmarks", {})
     if not isinstance(bm, dict):
         problems.append("bookmarks 不是对象")
@@ -54,30 +85,77 @@ def validate(data):
                     or not _is_nonneg_int(entry.get("sentence_idx", 0))):
                 problems.append(f"bookmarks[{os.path.basename(str(path))}] 形状不对")
                 break
-
-    vid = data.get("voice_id")
-    if vid is not None and not isinstance(vid, str):
-        problems.append("voice_id 不是字符串")
-
-    rate = data.get("speech_rate", 200)
-    if not isinstance(rate, (int, float)) or isinstance(rate, bool):
-        problems.append("speech_rate 不是数字")
-
     if not isinstance(data.get("sandbox_text", ""), str):
         problems.append("sandbox_text 不是字符串")
     if not _is_nonneg_int(data.get("sandbox_sentence_idx", 0)):
         problems.append("sandbox_sentence_idx 不是非负整数")
-
     notes = data.get("chapter_notes", {})
-    if not isinstance(notes, dict):
-        problems.append("chapter_notes 不是对象")
-    else:
-        for path, chapters in notes.items():
-            if not isinstance(chapters, dict) or not all(
-                    isinstance(k, str) and isinstance(v, str) for k, v in chapters.items()):
-                problems.append(f"chapter_notes[{os.path.basename(str(path))}] 形状不对")
-                break
+    if not isinstance(notes, dict) or not all(_is_str_dict_of_str(v) for v in notes.values()):
+        problems.append("chapter_notes 形状不对")
     return problems
+
+
+def _validate_v2(data):
+    problems = []
+    bm = data.get("bookmarks", {})
+    if not isinstance(bm, dict):
+        problems.append("bookmarks 不是对象")
+    else:
+        for path, entry in bm.items():
+            if (not isinstance(entry, dict)
+                    or not _is_nonneg_int(entry.get("chapter", 0))
+                    or not _is_nonneg_int(entry.get("offset", 0))):
+                problems.append(f"bookmarks[{os.path.basename(str(path))}] 形状不对")
+                break
+    notes = data.get("notes", {})
+    if not isinstance(notes, dict) or not all(_is_str_dict_of_str(v) for v in notes.values()):
+        problems.append("notes 形状不对")
+    pos = data.get("note_positions", {})
+    if not isinstance(pos, dict) or not all(
+            isinstance(v, dict) and all(isinstance(k, str) and _is_nonneg_int(o) for k, o in v.items())
+            for v in pos.values()):
+        problems.append("note_positions 形状不对")
+    for key in ("book_meta", "ai_usage"):
+        if not isinstance(data.get(key, {}), dict):
+            problems.append(f"{key} 不是对象")
+    mv1 = data.get("migrated_v1")
+    if mv1 is not None and not isinstance(mv1, dict):
+        problems.append("migrated_v1 不是对象")
+    return problems
+
+
+def migrate_v1_to_v2(data):
+    """v1 dict → v2 dict。纯函数，不碰文件。v1 的四个字段原样进 migrated_v1。"""
+    out = _defaults()
+    for k in ("recent_files", "last_file", "voice_id", "speech_rate"):
+        if k in data:
+            out[k] = data[k]
+    out["migrated_v1"] = {
+        "migrated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "bookmarks": data.get("bookmarks", {}),
+        "chapter_notes": data.get("chapter_notes", {}),
+        "sandbox_text": data.get("sandbox_text", ""),
+        "sandbox_sentence_idx": data.get("sandbox_sentence_idx", 0),
+    }
+    # v1 里没见过的键也带着，不丢
+    for k, v in data.items():
+        if k not in out and k not in ("bookmarks", "chapter_notes", "sandbox_text", "sandbox_sentence_idx"):
+            out[k] = v
+    return out
+
+
+def _keep_v1_copy(path):
+    """把 v1 文件复制成 bookmarks.v1-<时间>.json，永不轮换。复制失败返回 None（不阻止迁移，但 UI 会提）。"""
+    if not os.path.exists(path):
+        return None
+    base, ext = os.path.splitext(path)
+    dst = f"{base}.v1-{time.strftime('%Y%m%d-%H%M%S')}{ext}"
+    try:
+        import shutil
+        shutil.copyfile(path, dst)
+        return dst
+    except OSError:
+        return None
 
 
 class ConfigManager:
@@ -88,12 +166,20 @@ class ConfigManager:
             self.store.load_readonly()
         else:
             self.store.load()
-        # 文件里缺的键补默认值（老文件没有 chapter_notes 之类）；多出来的键保留
+
+        self.migrated_now = False
+        self.v1_backup = None
+        data = self.store.data
+        if data.get("schema") is None and not read_only:
+            # v1 原件先另存一份：.bak 下次保存就会被轮换掉，靠不住
+            self.v1_backup = _keep_v1_copy(path)
+            self.store.data = migrate_v1_to_v2(data)
+            self.migrated_now = True
+            self.store.save()
         merged = _defaults()
         merged.update(self.store.data)
         self.store.data = merged
 
-    # 旧代码到处直接读 self.config.config[...]，保留这个名字
     @property
     def config(self):
         return self.store.data
@@ -106,15 +192,14 @@ class ConfigManager:
     def last_error(self):
         return self.store.last_error
 
-    def load(self):
-        return self.store.load()
-
     def save(self):
-        """True 成功；False 失败，原因在 last_error。第 3 步起调用方据此决定要不要继续切章/关窗。"""
+        """True 成功；False 失败，原因在 last_error。切章 / 关窗前保存失败就不能继续（A.1）。"""
         ok = self.store.save()
         if not ok:
             print(f"Error saving config: {self.store.last_error}")
         return ok
+
+    # ---------- 最近文件 / 音色 ----------
 
     def add_recent_file(self, file_path):
         recent = self.config["recent_files"]
@@ -125,33 +210,49 @@ class ConfigManager:
         self.config["last_file"] = file_path
         return self.save()
 
-    def set_bookmark(self, file_path, chapter_idx, sentence_idx):
-        self.config["bookmarks"][file_path] = {
-            "chapter_idx": chapter_idx,
-            "sentence_idx": sentence_idx,
-        }
-        return self.save()
-
-    def get_bookmark(self, file_path):
-        return self.config["bookmarks"].get(file_path, {"chapter_idx": 0, "sentence_idx": 0})
-
     def set_voice_and_rate(self, voice_id, rate):
         self.config["voice_id"] = voice_id
         self.config["speech_rate"] = rate
         return self.save()
 
-    def save_sandbox(self, text, sentence_idx):
-        self.config["sandbox_text"] = text
-        self.config["sandbox_sentence_idx"] = sentence_idx
+    # ---------- 书签（章序号 + 字符偏移） ----------
+
+    def set_bookmark(self, book_key, chapter, offset):
+        self.config["bookmarks"][book_key] = {"chapter": int(chapter), "offset": int(offset)}
         return self.save()
 
-    def load_sandbox(self):
-        return self.config.get("sandbox_text", ""), self.config.get("sandbox_sentence_idx", 0)
+    def get_bookmark(self, book_key):
+        entry = self.config["bookmarks"].get(book_key) or {}
+        return int(entry.get("chapter", 0)), int(entry.get("offset", 0))
 
-    def save_chapter_note(self, file_path, chapter_idx, text):
-        notes = self.config.setdefault("chapter_notes", {})
-        notes.setdefault(file_path, {})[str(chapter_idx)] = text
+    # ---------- 笔记 ----------
+
+    def get_note(self, book_key, chapter_key):
+        return self.config["notes"].get(book_key, {}).get(str(chapter_key), "")
+
+    def set_note(self, book_key, chapter_key, text):
+        """空文本就删掉这条，免得 notes 里堆一堆空串。"""
+        notes = self.config["notes"]
+        chapter_key = str(chapter_key)
+        if text:
+            notes.setdefault(book_key, {})[chapter_key] = text
+        else:
+            book = notes.get(book_key)
+            if book:
+                book.pop(chapter_key, None)
+                if not book:
+                    notes.pop(book_key, None)
         return self.save()
 
-    def load_chapter_note(self, file_path, chapter_idx):
-        return self.config.get("chapter_notes", {}).get(file_path, {}).get(str(chapter_idx), "")
+    def get_note_position(self, book_key, chapter_key):
+        return int(self.config["note_positions"].get(book_key, {}).get(str(chapter_key), 0))
+
+    def set_note_position(self, book_key, chapter_key, offset, save=True):
+        self.config["note_positions"].setdefault(book_key, {})[str(chapter_key)] = int(offset)
+        return self.save() if save else True
+
+    # ---------- v1 旧数据（只读） ----------
+
+    def legacy(self):
+        """None 或 migrated_v1 dict。「旧笔记」菜单用。"""
+        return self.config.get("migrated_v1")
