@@ -36,3 +36,7 @@ scratch/
 .claude/
 .codex/
 .agents/
+
+# 任何写着 key 的文件都不进库
+*key*.txt
+*.key
