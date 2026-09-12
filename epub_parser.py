@@ -21,8 +21,17 @@ from ebooklib import epub
 warnings.filterwarnings('ignore', category=UserWarning, module='ebooklib')
 warnings.filterwarnings('ignore', category=FutureWarning, module='ebooklib')
 
-# 句末：中英文句号问号叹号，或换行。跟旧版一致；B6（闭引号、小数点、省略号）在第 6 步改这里。
-_SENT_END = re.compile(r'(?<=[.?!。？！\n])\s*')
+# 句末（B6，第 6 步）：
+# - 中文句号问号叹号、英文 ?!：连续的算一组（「！！！」「?!」不拆）
+# - 英文句点：只有后面跟空白 / 闭合引号 / 文本末尾才算句末 —— 「3.14」「www.a.com」不切；
+#   「Mr. Smith」仍会切，中文书为主，接受
+# - 换行永远是句末（段落边界）
+# - 省略号「……」不算句末：「他……走了。」是一句
+# 句末之后紧跟的闭合引号 / 括号归前一句：「他说。”她点头。」→ 「他说。”」「她点头。」
+_TERM = re.compile(r'''[。？！?!]+|\.+(?=[\s”’」』）》〉】\]\)"'…]|$)|\n''')
+_CLOSERS = re.compile(r'''[”’」』）》〉】\]\)"']*''')
+# 一句里至少要有一个字母 / 数字 / 汉字 / 假名才值得念；纯标点（比如单独一行的「……」）只高亮不念
+_HAS_WORD = re.compile(r'[\w぀-ヿ㐀-鿿豈-﫿]')
 
 
 @dataclass
@@ -30,6 +39,7 @@ class Sentence:
     text: str      # 去掉首尾空白后的句子
     start: int     # 在整章正文里的偏移（首尾空白已去掉后的精确位置）
     end: int
+    spoken: bool = True   # False = 纯标点碎片，高亮但不送 TTS（edge-tts 对「”」这种会报无音频）
 
 
 @dataclass
@@ -192,19 +202,21 @@ class EpubParser:
 
     @staticmethod
     def split_into_sentences(text):
-        """按句末标点 / 换行切，返回带偏移的 Sentence 列表。空片段丢掉。
+        """按句末切，返回带偏移的 Sentence 列表。空片段丢掉。
         偏移是相对传入 text 的，不做任何替换 —— 调用方要拿偏移回原文打标签。"""
         sentences = []
         pos = 0
         n = len(text)
-        for m in _SENT_END.finditer(text):
-            seg_start, seg_end = pos, m.start()
-            pos = m.end()
-            if seg_end <= seg_start:
-                continue
-            s = _strip_span(text, seg_start, seg_end)
+        for m in _TERM.finditer(text):
+            if m.start() < pos:
+                continue          # 闭合引号扩展已经把这个位置吃掉了
+            end = m.end()
+            if m.group(0) != chr(10):   # 换行本身不带闭合引号扩展
+                end = _CLOSERS.match(text, end).end()
+            s = _strip_span(text, pos, end)
             if s:
                 sentences.append(s)
+            pos = end
         if pos < n:
             s = _strip_span(text, pos, n)
             if s:
@@ -220,7 +232,8 @@ def _strip_span(text, start, end):
         end -= 1
     if start >= end:
         return None
-    return Sentence(text=text[start:end], start=start, end=end)
+    t = text[start:end]
+    return Sentence(text=t, start=start, end=end, spoken=bool(_HAS_WORD.search(t)))
 
 
 def sentence_index_at(sentences, offset):

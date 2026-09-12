@@ -413,7 +413,10 @@ class TTSWorker(threading.Thread):
 
     @staticmethod
     def _sentence(obj):
+        """返回 (文本, 音色覆盖)。spoken=False 的纯标点碎片返回空文本 —— 调用方当作没这句。"""
         if isinstance(obj, dict):
+            if obj.get("spoken") is False:
+                return "", None
             return obj["text"].strip(), obj.get("voice_id")
         return obj.strip(), None
 

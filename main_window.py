@@ -46,7 +46,7 @@ def parse_note_text(raw_text, split):
 
     def take(seg_start, seg_end):
         for s in split(raw_text[seg_start:seg_end]):
-            out.append({"text": s.text, "voice_id": active,
+            out.append({"text": s.text, "voice_id": active, "spoken": s.spoken,
                         "start": seg_start + s.start, "end": seg_start + s.end})
 
     for m in _TAG_RE.finditer(raw_text):
@@ -538,7 +538,7 @@ class MainWindow:
         self.play_btn.config(text="Pause")
         self._push_settings()
         self.active_target = "epub"
-        self.active_session = self.tts.play([s.text for s in self.current_sentences],
+        self.active_session = self.tts.play([{"text": s.text, "spoken": s.spoken} for s in self.current_sentences],
                                             self.current_sentence_idx, target="epub")
 
     def _stop_play(self):
@@ -712,28 +712,27 @@ class MainWindow:
 
     def _export_mp3_ui(self):
         if self.book_key is None:
-            messagebox.showerror("Error", "No chapter loaded!")
+            messagebox.showerror("导出", "没有打开的章节。")
             return
-        voice_id, _rate = self._current_voice_and_rate()
+        voice_id, rate = self._current_voice_and_rate()
         if voice_id not in NEURAL_VOICES:
-            messagebox.showerror("Error", "MP3 Export exclusively supports high-quality Online Native Voices.\n\n"
-                                          "Please select one of the top Narrator or Neural Voices to enable exports.")
+            messagebox.showerror("导出", "导出 mp3 只支持在线神经音色，请先在下面选一个 Neural 音色。")
             return
         raw_notes = self._note_text()
         notes_parsed = parse_note_text(raw_notes, EpubParser.split_into_sentences) if raw_notes.strip() else []
-        epub_s = [s.text for s in self.current_sentences]
-        if not epub_s:
-            messagebox.showinfo("Export", "Chapter is entirely empty.")
+        epub_s = [s.text for s in self.current_sentences if s.spoken]
+        if not epub_s and not notes_parsed:
+            messagebox.showinfo("导出", "本章没有可导出的内容。")
             return
 
         win = tk.Toplevel(self.root)
-        win.title("Exporting MP3")
-        win.geometry("300x120")
+        win.title("导出 mp3")
+        win.geometry("420x160")
         win.configure(bg="#1e1e1e")
         win.transient(self.root)
-        win.grab_set()
-        lbl = ttk.Label(win, text="Initializing Exporter Pipeline...", font=("Arial", 10))
-        lbl.pack(pady=20)
+        lbl = ttk.Label(win, text="准备中…", font=("Arial", 10), wraplength=400, justify=tk.LEFT)
+        lbl.pack(pady=16, padx=12, anchor=tk.W)
+        ttk.Button(win, text="关闭", command=win.destroy).pack(pady=4)
 
         try:
             chap_name = self.parser.chapters[self.current_chapter_idx].title
@@ -744,26 +743,30 @@ class MainWindow:
             # 使用者可能已经把导出窗口关了，别往销毁的控件上写
             self.root.after(0, lambda: win.winfo_exists() and lbl.config(text=status_text))
 
-        def on_complete(success):
-            if success:
-                self.root.after(0, lambda: [lbl.config(text="导出完成（文件 → 打开导出目录）", foreground="lightgreen"),
-                                            self.root.after(3000, lambda: [win.grab_release(), win.destroy()])])
-            else:
-                self.root.after(0, lambda: [lbl.config(text="Export failed.", foreground="red"),
-                                            self.root.after(3000, lambda: [win.grab_release(), win.destroy()])])
+        def on_complete(success, summary):
+            def show():
+                self._set_status(summary.splitlines()[0])
+                if win.winfo_exists():
+                    lbl.config(text=summary, foreground="lightgreen" if success else "orange")
+                if not success:
+                    messagebox.showwarning("导出", summary)
+            self.root.after(0, show)
 
         run_export_background(
             book_name=getattr(self, 'current_book_name', "Unknown Book"),
+            book_path=self.book_key,
+            chapter_index=self.current_chapter_idx,
             chapter_name=chap_name,
             epub_sentences=epub_s,
             notes_objects=notes_parsed,
             fallback_voice_id=voice_id,
+            rate=rate,
             status_callback=on_status_update,
             done_callback=on_complete,
             export_dir=self.layout.export,
         )
 
-    # ---------- worker 回调 ----------
+    # ---------- 高亮 ----------
 
     def _see_line_centered(self, text_widget, tag_name):
         start_idx = f"{tag_name}.first"
