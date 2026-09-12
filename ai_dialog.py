@@ -339,7 +339,8 @@ class ChapterChatDialog(ctk.CTkToplevel):
         prev = self._previous_summary()
         target = ai_chat.summary_target(self.chapter_text, language)
         messages = ai_chat.build_summary_messages(kind, language, self.chapter_text, prev, target)
-        max_tokens = min(target * 3, SUMMARY_MAX_TOKENS_CAP)
+        # 下限 2048：目标字数 × 3 对短章太小；上限 8192（A.5：截断要显式处理，不靠猜）
+        max_tokens = max(2048, min(target * 3, SUMMARY_MAX_TOKENS_CAP))
         ok, est, limit = ai_chat.budget_ok(self.app.ai_cfg["model"], messages, max_tokens)
         if not ok:
             self._append(f"这一章太长：估算 {est:,} tokens + 输出 {max_tokens:,} 超过模型上限 {limit:,}。", "error")

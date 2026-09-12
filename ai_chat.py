@@ -164,10 +164,14 @@ class OpenRouterClient:
 
     # ---------- 非流式 ----------
 
+    # 讲解、追问、判定都是写作 / 分类任务，不需要推理模型的「思考」阶段。
+    # 2026-09-12 实测：不关的话 deepseek-v4.1-flash 把 1515 个 max_tokens 全花在思考上，正文 0 字、130 秒后截断。
+    _NO_REASONING = {"reasoning": {"enabled": False}}
+
     def complete(self, request, messages, max_tokens, json_mode=False, temperature=0.3):
         """返回 (text, usage_dict, finish_reason)。失败抛 AiError。取消 → AiError("已取消")。"""
         body = {"model": self.model, "messages": messages, "max_tokens": max_tokens,
-                "temperature": temperature, "stream": False, "usage": {"include": True}}
+                "temperature": temperature, "stream": False, "usage": {"include": True}, **self._NO_REASONING}
         if json_mode:
             body["response_format"] = {"type": "json_object"}
         resp = self._open(self._request(body))
@@ -226,7 +230,7 @@ class OpenRouterClient:
         resp = None
         try:
             body = {"model": self.model, "messages": messages, "max_tokens": max_tokens,
-                    "temperature": temperature, "stream": True, "usage": {"include": True}}
+                    "temperature": temperature, "stream": True, "usage": {"include": True}, **self._NO_REASONING}
             resp = self._open(self._request(body))
             start = time.monotonic()
             pending = b""
