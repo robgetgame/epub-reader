@@ -14,17 +14,19 @@ def main():
     portable = "--portable" in sys.argv[1:]
     layout = paths.resolve_layout(portable)
 
-    ctk.set_appearance_mode("dark")
-    root = ctk.CTk()
-    root.withdraw()   # 先不显示：单实例检查失败时直接退出，不闪一下主窗口
-
+    # 单实例检查放在建 CTk 根窗口之前。CTk 在 Windows 上自己管理首次显示：
+    # 建好后先 withdraw、mainloop 时再 deiconify；如果我们在那之前手动 withdraw 过，它就不再自动显示
+    # —— 2026-09-12 打包版窗口「一闪就没了」就是这个原因。所以提示用一个临时的普通 Tk 窗口。
     lock = paths.InstanceLock(layout.lock_path)
     if not lock.acquire():
+        tmp = tk.Tk()
+        tmp.withdraw()
         messagebox.showinfo("EPUB Reader", "已经有一个 EPUB Reader 在运行。")
-        root.destroy()
+        tmp.destroy()
         return
 
-    root.deiconify()
+    ctk.set_appearance_mode("dark")
+    root = ctk.CTk()
     app = MainWindow(root, layout)
     try:
         root.mainloop()
