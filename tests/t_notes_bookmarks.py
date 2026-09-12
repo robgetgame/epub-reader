@@ -55,6 +55,7 @@ sys.modules["tts_thread"] = fake_tts
 
 import tkinter as tk
 from tkinter import messagebox
+import customtkinter as ctk
 
 from ebooklib import epub
 
@@ -110,7 +111,7 @@ for name in ("showinfo", "showwarning", "showerror"):
     setattr(messagebox, name, lambda title, msg, _n=name, **kw: popups.append((_n, title, msg)))
 messagebox.askyesno = lambda title, msg, **kw: popups.append(("askyesno", title, msg)) or False
 
-tk_root = tk.Tk()
+tk_root = ctk.CTk()
 tk_root.withdraw()
 
 
@@ -133,7 +134,7 @@ def new_app(v1_data=None, v2_data=None):
     if new_app.prev is not None:
         new_app.prev._closed = True      # 停掉上一个实例的事件定时器
         tk_root.destroy()                 # CustomTkinter 控件不能在旧根上重建，换一个根
-        tk_root = tk.Tk()
+        tk_root = ctk.CTk()
         tk_root.withdraw()
     app = MainWindow(tk_root, layout)
     new_app.prev = app

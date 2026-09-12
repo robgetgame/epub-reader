@@ -26,7 +26,9 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
+import ai_chat
 import paths
+from ai_dialog import ChapterChatDialog, ChatStore
 from config_manager import ConfigManager, SCRATCH_BOOK
 from epub_parser import EpubParser, sentence_index_at
 from mp3_exporter import run_export_background
@@ -152,6 +154,20 @@ class MainWindow:
 
         self.events = queue.Queue()
         self.tts = TTSWorker(self.events, cache_dir=self.layout.cache)
+
+        # AI（第 8 步）：配置来自 config.json + 环境变量；client 建不起来（base_url 非法）也不挡程序
+        self.ai_cfg = ai_chat.load_ai_config(paths.load_config(self.layout.portable)[0])
+        self.ai_client = None
+        self.ai_error = None
+        try:
+            self.ai_client = ai_chat.OpenRouterClient(self.ai_cfg["model"], self.ai_cfg["api_key"], self.ai_cfg["base_url"],
+                                                      self.ai_cfg["allow_custom_base_url"])
+        except ai_chat.AiError as e:
+            self.ai_error = str(e)
+        self.ai_manager = ai_chat.AiTaskManager(self.events)
+        self.chat_store = ChatStore(self.layout.ai_chat_path, read_only=not self.layout.data_ok)
+        self.ai_dialog = None
+        self._billed_requests = set()
         self.sapi_voices = []
         self.voices_ready = False
 
@@ -175,6 +191,10 @@ class MainWindow:
             messagebox.showwarning("数据目录", self.layout.data_problem)
         if self.config.load_error:
             messagebox.showwarning("数据文件", self.config.load_error)
+        if self.chat_store.load_error:
+            messagebox.showwarning("对话记录", self.chat_store.load_error)
+        if self.ai_error:
+            self._set_status("AI 不可用：" + self.ai_error)
         if self.startup_notes:
             messagebox.showinfo("数据迁移", chr(10).join(self.startup_notes))
 
@@ -270,6 +290,8 @@ class MainWindow:
         self.kind_var = tk.StringVar(value=KIND_UNSET)
         self.kind_menu = ctk.CTkOptionMenu(hdr, variable=self.kind_var, values=[KIND_UNSET] + list(KIND_LABELS.values()),
                                            width=96, command=self._on_kind_change, fg_color="#2c2c2c", button_color="#3a3a3a")
+        self.ai_btn = ctk.CTkButton(hdr, text="AI 讲解…", width=90, fg_color=ACCENT, hover_color=ACCENT_HOVER, command=self._open_ai_dialog)
+        self.ai_btn.pack(side="right", padx=(10, 0))
         self.kind_menu.pack(side="right")
         ctk.CTkLabel(hdr, text="类型", text_color=FG_DIM).pack(side="right", padx=(8, 6))
 
@@ -407,6 +429,8 @@ class MainWindow:
     def _on_kind_change(self, label):
         if self.book_key is None:
             return
+        if self.ai_dialog is not None:
+            self.root.after(0, lambda: self.ai_dialog and (self.ai_dialog._refresh_kind_label(), self.ai_dialog._refresh_buttons()))
         for kind, lab in KIND_LABELS.items():
             if lab == label:
                 self.config.set_book_kind(self.book_key, kind, "manual")
@@ -417,6 +441,24 @@ class MainWindow:
             meta.pop("kind", None)
             meta.pop("kind_source", None)
             self.config.save()
+
+    def _open_ai_dialog(self):
+        if self.book_key is None:
+            messagebox.showinfo("AI 讲解", "先打开一本书。")
+            return
+        if self.ai_error:
+            messagebox.showerror("AI 讲解", self.ai_error)
+            return
+        if self.ai_dialog is not None:
+            try:
+                self.ai_dialog.lift()
+                self.ai_dialog.focus_force()
+                return
+            except tk.TclError:
+                self.ai_dialog = None
+        note_id = self._note_id_for_chapter(self.current_chapter_idx)
+        title = self.parser.chapters[self.current_chapter_idx].title
+        self.ai_dialog = ChapterChatDialog(self, note_id, title, self.book_title_var.get(), self.chapter_text)
 
     def _update_note_header(self):
         if self.displayed_note is None:
@@ -1019,6 +1061,9 @@ class MainWindow:
             self._set_status(msg[1])
             messagebox.showerror("音频输出", msg[1] + chr(10) + "神经音色无法播放；本机语音不受影响。")
             return
+        if kind.startswith("ai_"):
+            self._handle_ai_event(msg)
+            return
 
         sid = msg[1]
         if sid != self.active_session:
@@ -1036,6 +1081,51 @@ class MainWindow:
         elif kind == "done":
             _, _, status, skipped = msg
             self._on_session_done(status, skipped)
+
+    def _handle_ai_event(self, msg):
+        """ai_done 永远先记账再转给对话窗（A.5）；对话窗关了消息就丢，占用照样在 ai_finished 释放。"""
+        kind = msg[0]
+        dlg = self.ai_dialog
+        if kind == "ai_delta":
+            if dlg is not None:
+                dlg.on_delta(msg[1], msg[2])
+        elif kind == "ai_done":
+            _, rid, status, text, usage, finish, error = msg
+            self._bill(rid, usage)
+            if dlg is not None:
+                dlg.on_done(rid, status, text, usage, finish, error)
+        elif kind == "ai_finished":
+            if dlg is not None:
+                dlg.on_finished(msg[1])
+        elif kind == "ai_detect":
+            _, rid, book_key, result, error, usage = msg
+            self._bill(rid, usage)
+            if result and not self.config.get_book_meta(book_key).get("kind"):
+                self.config.set_book_kind(book_key, result["kind"], "auto", result.get("language"))
+                if book_key == self.book_key:
+                    self._refresh_kind_menu()
+            if dlg is not None:
+                dlg.on_detect(rid, result, error, usage)
+
+    def _bill(self, rid, usage):
+        """累计到 bookmarks.json 的 ai_usage。按请求 id 去重；没有 usage 记为费用未知，不记 0。"""
+        if rid in self._billed_requests:
+            return
+        self._billed_requests.add(rid)
+        totals = self.config.config.setdefault("ai_usage", {})
+        p, c, cached, cost = ai_chat.usage_summary(usage)
+        if p is None and c is None and cost is None:
+            totals["unknown_cost_requests"] = totals.get("unknown_cost_requests", 0) + 1
+        else:
+            totals["prompt_tokens"] = totals.get("prompt_tokens", 0) + (p or 0)
+            totals["completion_tokens"] = totals.get("completion_tokens", 0) + (c or 0)
+            totals["cached_tokens"] = totals.get("cached_tokens", 0) + (cached or 0)
+            if cost is None:
+                totals["unknown_cost_requests"] = totals.get("unknown_cost_requests", 0) + 1
+            else:
+                totals["cost_usd"] = totals.get("cost_usd", 0.0) + cost
+        totals["requests"] = totals.get("requests", 0) + 1
+        self.config.save()
 
     def _highlight_note(self, index):
         self.note_sentence_idx = index
@@ -1109,5 +1199,6 @@ class MainWindow:
                 return
         self._cancel_auto_next()
         self._closed = True
+        self.ai_manager.cancel_running()
         self.tts.quit()
         self.root.destroy()
