@@ -424,6 +424,27 @@ check(spoken[0][1] == "sapi-a" and spoken[-1][1] == "sapi-b", f"后面的句子�
 check(spoken[-1][2] == 4, f"语速 260 → SAPI rate 4：{spoken[-1][2]}")
 w.quit()
 
+# ---------- 12b. prewarm：没按播放先下好、同 tag 换批释放旧的 ----------
+print("12b. prewarm")
+w, ev, dl = make_worker(os.path.join(tmp_root, "c12b"))
+wait_ready(ev)
+w.set_settings(NEURAL, 200)
+w.prewarm(["预热一。", "预热二。", "预热三。"], 0)
+time.sleep(0.5)
+check(all(os.path.exists(dl.cache_path(t, NEURAL, "+0%")) for t in ["预热一。", "预热二。", "预热三。"]), "三句都下好了")
+dl.block = threading.Event()
+w.prewarm(["新批。"] * 1, 0)
+with dl._lock:
+    subs = {j.path: set(j.subscribers) for j in dl._jobs.values()}
+check(all("prewarm" not in v or j.endswith(dl.cache_path("新批。", NEURAL, "+0%")) for j, v in subs.items()), "换批后旧 prewarm 订阅释放")
+dl.block.set(); dl.block = None
+w.set_settings("sapi-a", 200)
+before = dict(dl.calls)
+w.prewarm(["本机不下载。"], 0)
+time.sleep(0.2)
+check(dl.calls == before, "本机语音不触发下载")
+w.quit()
+
 # ---------- 13. end_idx：选区播放到指定句就停 ----------
 print("13. end_idx")
 w, ev, dl = make_worker(os.path.join(tmp_root, "c13"))

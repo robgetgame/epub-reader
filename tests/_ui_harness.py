@@ -41,6 +41,9 @@ class FakeTTS:
     def stop(self):
         self.stops += 1
 
+    def prewarm(self, sentences, start_idx, count=6, tag="prewarm"):
+        self.prewarms = getattr(self, "prewarms", []) + [(start_idx, count, tag)]
+
     def quit(self):
         pass
 

@@ -22,9 +22,38 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 
-DEFAULT_MODEL = "deepseek/deepseek-v4.1-flash"
-DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
-ALLOWED_ORIGIN = "https://openrouter.ai"
+# 两家都是 OpenAI 兼容格式，差别只在：地址、key 的环境变量、默认模型、关思考的参数、费用字段。
+# 2026-09-12 使用者拍板默认走 DeepSeek 直连（D27）。价格（DeepSeek 官网，USD / 百万 tokens）：
+#   deepseek-flash 高峰 $0.30 入 / $1.20 出，非高峰半价；高峰 = UTC 01–04、06–10 工作日。OpenRouter 全天 $0.15 / $0.60。
+PROVIDERS = {
+    "deepseek": {
+        "base_url": "https://api.deepseek.com",
+        "origin": "https://api.deepseek.com",
+        "key_env": "DEEPSEEK_API_KEY",
+        "model": "deepseek-flash",
+        "no_thinking": {"thinking": {"type": "disabled"}},
+        "usage_opt": {"stream_options": {"include_usage": True}},
+    },
+    "openrouter": {
+        "base_url": "https://openrouter.ai/api/v1",
+        "origin": "https://openrouter.ai",
+        "key_env": "OPENROUTER_KEY",
+        "model": "deepseek/deepseek-v4.1-flash",
+        "no_thinking": {"reasoning": {"enabled": False}},
+        "usage_opt": {"usage": {"include": True}},
+    },
+}
+DEFAULT_PROVIDER = "deepseek"
+DEFAULT_MODEL = PROVIDERS[DEFAULT_PROVIDER]["model"]
+DEFAULT_BASE_URL = PROVIDERS[DEFAULT_PROVIDER]["base_url"]
+
+# DeepSeek 不返回费用，按官网价估算（USD / 百万 tokens，2026-09-12）。OpenRouter 返回实际 cost，不用这个表。
+DEEPSEEK_PRICES = {
+    # model: (高峰 命中输入, 高峰 未命中输入, 高峰 输出)；非高峰一律半价
+    "deepseek-flash": (0.006, 0.30, 1.20),
+    "deepseek-v4-flash": (0.006, 0.30, 1.20),
+    "deepseek-v4-pro": (0.044, 1.32, 3.96),
+}
 SOCKET_TIMEOUT_S = 30
 DEADLINE_S = 180
 MAX_BODY_BYTES = 2 * 1024 * 1024
@@ -32,6 +61,9 @@ READ_CHUNK = 4096
 
 # 按 model id 的上下文上限（2026-09-12 抄自 OpenRouter 模型页）；不认识的模型按 32k 保守值
 CONTEXT_LIMITS = {
+    "deepseek-flash": 1_048_576,
+    "deepseek-v4-flash": 1_048_576,
+    "deepseek-v4-pro": 1_048_576,
     "deepseek/deepseek-v4.1-flash": 1_048_576,
     "deepseek/deepseek-v4-pro": 262_144,
     "deepseek/deepseek-v3.2": 163_840,
@@ -76,19 +108,45 @@ class AiRequest:
 # ====================================================================
 
 def load_ai_config(cfg):
-    """cfg 是 config.json 的 dict（paths.load_config 读出来的）。返回可直接喂给 OpenRouterClient 的参数。"""
-    model = cfg.get("model") if isinstance(cfg.get("model"), str) and cfg.get("model").strip() else DEFAULT_MODEL
-    base = cfg.get("base_url") if isinstance(cfg.get("base_url"), str) and cfg.get("base_url").strip() else DEFAULT_BASE_URL
+    """cfg 是 config.json 的 dict。provider ∈ deepseek / openrouter；model、base_url 缺省按 provider 取。"""
+    provider = cfg.get("provider") if cfg.get("provider") in PROVIDERS else DEFAULT_PROVIDER
+    spec = PROVIDERS[provider]
+    model = cfg.get("model") if isinstance(cfg.get("model"), str) and cfg.get("model").strip() else spec["model"]
+    base = cfg.get("base_url") if isinstance(cfg.get("base_url"), str) and cfg.get("base_url").strip() else spec["base_url"]
     turns = cfg.get("history_turns")
     if not isinstance(turns, int) or isinstance(turns, bool) or turns < 0:
         turns = 10
     return {
+        "provider": provider,
         "model": model.strip(),
         "base_url": base.strip().rstrip("/"),
         "allow_custom_base_url": bool(cfg.get("allow_custom_base_url")),
         "history_turns": turns,
-        "api_key": os.environ.get("OPENROUTER_KEY", "").strip(),
+        "api_key": os.environ.get(spec["key_env"], "").strip(),
+        "key_env": spec["key_env"],
     }
+
+
+def is_peak_utc(t=None):
+    """DeepSeek 高峰：UTC 01:00–04:00、06:00–10:00，周一到周五。"""
+    t = t or time.gmtime()
+    if t.tm_wday >= 5:
+        return False
+    return 1 <= t.tm_hour < 4 or 6 <= t.tm_hour < 10
+
+
+def estimate_cost(model, usage, t=None):
+    """DeepSeek 直连没有 cost 字段：按官网价估。不认识的模型 → None（费用未知，不记 0）。"""
+    prices = DEEPSEEK_PRICES.get(model)
+    if not prices or not usage:
+        return None
+    hit_in, miss_in, out = prices
+    if not is_peak_utc(t):
+        hit_in, miss_in, out = hit_in / 2, miss_in / 2, out / 2
+    hit = usage.get("prompt_cache_hit_tokens") or (usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
+    prompt = usage.get("prompt_tokens") or 0
+    completion = usage.get("completion_tokens") or 0
+    return (hit * hit_in + max(0, prompt - hit) * miss_in + completion * out) / 1_000_000
 
 
 def context_limit(model):
@@ -112,16 +170,23 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class OpenRouterClient:
+    """名字沿用；实际同时支持 OpenRouter 和 DeepSeek 直连（provider 参数）。"""
+
     def __init__(self, model, api_key, base_url=DEFAULT_BASE_URL, allow_custom_base_url=False,
-                 socket_timeout=SOCKET_TIMEOUT_S, deadline=DEADLINE_S):
+                 socket_timeout=SOCKET_TIMEOUT_S, deadline=DEADLINE_S, provider=DEFAULT_PROVIDER):
+        self.provider = provider if provider in PROVIDERS else DEFAULT_PROVIDER
+        spec = PROVIDERS[self.provider]
         self.model = model
         self.api_key = api_key or ""
         self.base_url = base_url.rstrip("/")
-        if not self.base_url.startswith(ALLOWED_ORIGIN + "/") and self.base_url != ALLOWED_ORIGIN:
+        allowed = spec["origin"]
+        if not self.base_url.startswith(allowed + "/") and self.base_url != allowed:
             if not allow_custom_base_url:
-                raise AiError(f"base_url 不是 {ALLOWED_ORIGIN}，要用别的地址请在 config.json 里加 allow_custom_base_url: true")
+                raise AiError(f"base_url 不是 {allowed}，要用别的地址请在 config.json 里加 allow_custom_base_url: true")
             if not self.base_url.startswith("https://"):
                 raise AiError("base_url 必须是 https")
+        self._no_thinking = spec["no_thinking"]
+        self._usage_opt = spec["usage_opt"]
         self.socket_timeout = socket_timeout
         self.deadline = deadline
         self._opener = urllib.request.build_opener(_NoRedirect())
@@ -146,7 +211,7 @@ class OpenRouterClient:
     def _open(self, req):
         """返回响应对象；HTTP 错误和网络错误统一成 AiError（已脱敏）。"""
         if not self.api_key:
-            raise AiError("OPENROUTER_KEY 没有设置（设置后需重启程序）")
+            raise AiError(f"{PROVIDERS[self.provider]['key_env']} 没有设置（设置后需重启程序）")
         try:
             return self._opener.open(req, timeout=self.socket_timeout)
         except urllib.error.HTTPError as e:
@@ -165,13 +230,15 @@ class OpenRouterClient:
     # ---------- 非流式 ----------
 
     # 讲解、追问、判定都是写作 / 分类任务，不需要推理模型的「思考」阶段。
-    # 2026-09-12 实测：不关的话 deepseek-v4.1-flash 把 1515 个 max_tokens 全花在思考上，正文 0 字、130 秒后截断。
-    _NO_REASONING = {"reasoning": {"enabled": False}}
+    # 2026-09-12 实测：不关的话 V4.1 Flash 把 1515 个 max_tokens 全花在思考上，正文 0 字、130 秒后截断。
+    # OpenRouter 用 reasoning.enabled=false，DeepSeek 直连用 thinking.type=disabled（见 PROVIDERS）。
 
     def complete(self, request, messages, max_tokens, json_mode=False, temperature=0.3):
         """返回 (text, usage_dict, finish_reason)。失败抛 AiError。取消 → AiError("已取消")。"""
         body = {"model": self.model, "messages": messages, "max_tokens": max_tokens,
-                "temperature": temperature, "stream": False, "usage": {"include": True}, **self._NO_REASONING}
+                "temperature": temperature, "stream": False, **self._no_thinking}
+        if self.provider == "openrouter":
+            body.update(self._usage_opt)
         if json_mode:
             body["response_format"] = {"type": "json_object"}
         resp = self._open(self._request(body))
@@ -230,7 +297,7 @@ class OpenRouterClient:
         resp = None
         try:
             body = {"model": self.model, "messages": messages, "max_tokens": max_tokens,
-                    "temperature": temperature, "stream": True, "usage": {"include": True}, **self._NO_REASONING}
+                    "temperature": temperature, "stream": True, **self._no_thinking, **self._usage_opt}
             resp = self._open(self._request(body))
             start = time.monotonic()
             pending = b""
@@ -369,15 +436,20 @@ class AiTaskManager:
 # 费用
 # ====================================================================
 
-def usage_summary(usage):
-    """OpenRouter 的 usage → (prompt, completion, cached, cost_usd|None)。没有 usage → 全 None。"""
+def usage_summary(usage, model=None):
+    """usage → (prompt, completion, cached, cost_usd|None)。没有 usage → 全 None。
+    OpenRouter 有实际 cost；DeepSeek 直连没有，给了 model 就按价格表估（估算也比「未知」有用，UI 标 ≈）。"""
     if not usage:
         return None, None, None, None
     prompt = usage.get("prompt_tokens")
     completion = usage.get("completion_tokens")
-    cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+    cached = usage.get("prompt_cache_hit_tokens")
+    if cached is None:
+        cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
     cost = usage.get("cost")
-    return prompt, completion, cached, (float(cost) if isinstance(cost, (int, float)) else None)
+    if isinstance(cost, (int, float)):
+        return prompt, completion, cached, float(cost)
+    return prompt, completion, cached, (estimate_cost(model, usage) if model else None)
 
 
 # ====================================================================

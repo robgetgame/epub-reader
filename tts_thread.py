@@ -36,7 +36,8 @@ CACHE_TARGET_MB = 400
 DOWNLOAD_TIMEOUT_S = 60      # 单次 edge-tts 下载
 WAIT_TIMEOUT_S = 20          # 播放循环等一句音频的上限
 MAX_RETRIES = 2              # 同一句在一个 session 内的重试次数
-PREFETCH_AHEAD = 3
+PREFETCH_AHEAD = 6           # 边播边预取的深度（2026-09-12 由 3 提到 6：短句连着来时 3 句追不上）
+PREWARM_COUNT = 6            # 还没按播放就先下好的句数（开章、恢复位置、停下时）
 
 NEURAL_VOICES = [
     'zh-CN-YunyangNeural',
@@ -127,7 +128,7 @@ class Job:
 
 
 class EdgeTTSDownloader:
-    def __init__(self, cache_dir=DEFAULT_CACHE_DIR, max_workers=4, max_pending=8):
+    def __init__(self, cache_dir=DEFAULT_CACHE_DIR, max_workers=4, max_pending=12):
         self.cache_dir = cache_dir
         os.makedirs(cache_dir, exist_ok=True)
         self._lock = threading.Lock()
@@ -334,6 +335,25 @@ class TTSWorker(threading.Thread):
     def _get_volume(self):
         with self._settings_lock:
             return self._volume
+
+    def prewarm(self, sentences, start_idx, count=PREWARM_COUNT, tag="prewarm"):
+        """还没按播放就把接下来几句先下好（开章、恢复书签、停下时、快到章末时下一章的开头）。
+        从 UI 线程调；下载器自己有锁。同一个 tag 的上一批先释放，免得旧章的预热任务堆着。
+        只对神经音色有意义；本机语音不用下载。"""
+        self.downloader.release(tag)
+        fallback, rate = self._get_settings()
+        edge_rate, _ = self._rate_strings(rate)
+        n = 0
+        for i in range(max(0, start_idx), len(sentences)):
+            if n >= count:
+                break
+            txt, override = self._sentence(sentences[i])
+            voice = override or fallback
+            if not txt:
+                continue
+            if voice in NEURAL_VOICES:
+                self.downloader.request(txt, voice, edge_rate, tag, prefetch=True)
+            n += 1
 
     def play(self, sentences, start_idx=0, target="epub", end_idx=None):
         """取消一切在跑的，登记新 session，入队。返回 session id。"""

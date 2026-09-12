@@ -162,7 +162,7 @@ class MainWindow:
         self.ai_error = None
         try:
             self.ai_client = ai_chat.OpenRouterClient(self.ai_cfg["model"], self.ai_cfg["api_key"], self.ai_cfg["base_url"],
-                                                      self.ai_cfg["allow_custom_base_url"])
+                                                      self.ai_cfg["allow_custom_base_url"], provider=self.ai_cfg["provider"])
         except ai_chat.AiError as e:
             self.ai_error = str(e)
         self.ai_manager = ai_chat.AiTaskManager(self.events)
@@ -709,10 +709,12 @@ class MainWindow:
 
         self._render_sentences(self.text_area, self.chapter_text, self.current_sentences, editable=False)
 
+        self._next_chapter_prewarmed = False
         if self.current_sentences:
             self.current_sentence_idx = min(sentence_index_at(self.current_sentences, offset),
                                             len(self.current_sentences) - 1)
             self._highlight_epub(self.current_sentence_idx, save=True)
+            self._prewarm_from(self.current_sentence_idx)
         else:
             self.current_sentence_idx = 0
             self.config.set_bookmark(self.book_key, index, 0)
@@ -811,6 +813,30 @@ class MainWindow:
             self.active_session = None
             self.tts.stop()
             self._save_epub_bookmark()
+            self._prewarm_from(self.current_sentence_idx)
+
+    def _epub_payload(self):
+        return [{"text": s.text, "spoken": s.spoken} for s in self.current_sentences]
+
+    def _prewarm_from(self, idx):
+        """把从 idx 起的几句先下好，按播放时不用等第一句（使用者反馈「一开始 lag」）。"""
+        if self.book_key is None or not self.current_sentences:
+            return
+        self._push_settings()
+        self.tts.prewarm(self._epub_payload(), idx)
+
+    def _maybe_prewarm_next_chapter(self, idx):
+        """快到章末时把下一章开头几句先下好，自动翻页不用等。只做一次。"""
+        if getattr(self, "_next_chapter_prewarmed", False) or self.book_key is None:
+            return
+        if idx < len(self.current_sentences) - 8:
+            return
+        nxt = self.current_chapter_idx + 1
+        if nxt >= len(self.parser.chapters):
+            return
+        self._next_chapter_prewarmed = True
+        _, sentences = self.parser.get_chapter_sentences(nxt)
+        self.tts.prewarm([{"text": s.text, "spoken": s.spoken} for s in sentences], 0, count=4, tag="prewarm-next")
 
     def _save_epub_bookmark(self):
         if self.book_key is not None and self.current_sentences:
@@ -1102,6 +1128,7 @@ class MainWindow:
                 self._highlight_note(idx)
             else:
                 self._highlight_epub(idx, save=True)
+                self._maybe_prewarm_next_chapter(idx)
         elif kind == "skipped":
             _, _, idx, reason = msg
             self.skipped_log.append((self.current_chapter_idx if self.active_target == "epub" else -1, idx, reason))
@@ -1141,7 +1168,7 @@ class MainWindow:
             return
         self._billed_requests.add(rid)
         totals = self.config.config.setdefault("ai_usage", {})
-        p, c, cached, cost = ai_chat.usage_summary(usage)
+        p, c, cached, cost = ai_chat.usage_summary(usage, self.ai_cfg["model"])
         if p is None and c is None and cost is None:
             totals["unknown_cost_requests"] = totals.get("unknown_cost_requests", 0) + 1
         else:
@@ -1189,6 +1216,7 @@ class MainWindow:
             # 选区读完：光标放到选区之后那句，不翻页
             self.current_sentence_idx = min(selection_end + 1, len(self.current_sentences) - 1)
             self._highlight_epub(self.current_sentence_idx, save=True)
+            self._prewarm_from(self.current_sentence_idx)
             self._set_status("选区读完" + (f"，跳过了 {len(skipped)} 句（点这里看）" if skipped else ""))
             return
         self._save_epub_bookmark()

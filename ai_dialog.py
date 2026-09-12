@@ -109,8 +109,8 @@ class ChatStore:
                 "unknown_cost_requests": unknown}
 
 
-def _usage_entry(usage):
-    p, c, cached, cost = ai_chat.usage_summary(usage)
+def _usage_entry(usage, model=None):
+    p, c, cached, cost = ai_chat.usage_summary(usage, model)
     if p is None and c is None and cost is None:
         return None
     return {"prompt_tokens": p, "completion_tokens": c, "cached_tokens": cached, "cost_usd": cost}
@@ -269,11 +269,13 @@ class ChapterChatDialog(ctk.CTkToplevel):
         kind = meta.get("kind")
         label = {"fiction": "小说", "nonfiction": "非虚构"}.get(kind, "未判定")
         src = {"auto": "自动", "manual": "手选"}.get(meta.get("kind_source"), "")
-        self.kind_label_var.set(f"类型：{label}{'（' + src + '）' if src and kind else ''}   模型：{self.app.ai_cfg['model']}")
+        self.kind_label_var.set(f"类型：{label}{'（' + src + '）' if src and kind else ''}   "
+                                f"{self.app.ai_cfg['provider']} · {self.app.ai_cfg['model']}")
 
     def _refresh_usage(self):
         t = self.app.chat_store.usage_totals()
-        s = f"累计 {t['prompt_tokens'] + t['completion_tokens']:,} tokens · ${t['cost_usd']:.4f}"
+        approx = "≈" if self.app.ai_cfg["provider"] == "deepseek" else ""
+        s = f"累计 {t['prompt_tokens'] + t['completion_tokens']:,} tokens · {approx}${t['cost_usd']:.4f}"
         if t["unknown_cost_requests"]:
             s += f" · {t['unknown_cost_requests']} 次费用未知"
         self.usage_var.set(s)
@@ -285,7 +287,7 @@ class ChapterChatDialog(ctk.CTkToplevel):
         self.send_btn.configure(state="disabled" if (busy or no_key) else "normal")
         self.gen_btn.configure(state="disabled" if (busy or no_key or kind is None) else "normal")
         if no_key:
-            self.state_var.set("OPENROUTER_KEY 没有设置（设置后需重启程序）")
+            self.state_var.set(f"{self.app.ai_cfg['key_env']} 没有设置（设置后需重启程序）")
         elif busy:
             self.state_var.set("上一个请求还在结束…" if self.active_request is None else "进行中…")
         elif kind is None:
@@ -299,7 +301,7 @@ class ChapterChatDialog(ctk.CTkToplevel):
         if self.app.config.get_book_meta(self.book_key).get("kind"):
             return
         if not self.app.ai_cfg["api_key"]:
-            self._append("OPENROUTER_KEY 没有设置，无法判定类型和生成讲解。请在主窗口手选类型，或设置 key 后重启。", "error")
+            self._append(f"{self.app.ai_cfg['key_env']} 没有设置，无法判定类型和生成讲解。请在主窗口手选类型，或设置 key 后重启。", "error")
             return
         titles = [c.title for c in self.app.parser.chapters]
         samples = []
@@ -442,7 +444,7 @@ class ChapterChatDialog(ctk.CTkToplevel):
         self.active_request = None
         entry = {"role": "assistant", "content": text, "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
                  "request_id": rid, "status": status, "is_summary": req.purpose == "summary",
-                 "usage": _usage_entry(usage), "model": req.model}
+                 "usage": _usage_entry(usage, req.model), "model": req.model}
         self.app.chat_store.append(self.book_key, self.chapter_key, entry)
         self._refresh_usage()
 

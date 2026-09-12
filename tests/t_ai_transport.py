@@ -58,6 +58,8 @@ class FakeHTTPError(urllib.error.HTTPError):
 
 
 def client_with(resp_factory, **kw):
+    kw.setdefault("provider", "openrouter")
+    kw.setdefault("base_url", "https://openrouter.ai/api/v1")
     c = OpenRouterClient("deepseek/deepseek-v4.1-flash", "sk-or-SECRET123", **kw)
     c._opener = type("O", (), {"open": staticmethod(lambda req, timeout=None: resp_factory(req))})()
     return c
@@ -166,14 +168,17 @@ def raise_401(req):
 c = client_with(raise_401)
 done, _, _ = run_stream(c, None)
 check(done[2] == "failed" and "HTTP 401" in done[6] and "SECRET123" not in done[6], f"401 脱敏：{done[6]}")
-c2 = OpenRouterClient("m", "")
+c2 = OpenRouterClient("m", "", provider="openrouter", base_url="https://openrouter.ai/api/v1")
 done, _, _ = run_stream(c2, None)
-check(done[2] == "failed" and "OPENROUTER_KEY" in done[6], "没 key 直接失败并说明")
+check(done[2] == "failed" and "OPENROUTER_KEY" in done[6], "没 key 直接失败并说明（openrouter）")
+c3 = OpenRouterClient("deepseek-flash", "")
+done, _, _ = run_stream(c3, None)
+check(done[2] == "failed" and "DEEPSEEK_API_KEY" in done[6], "没 key 直接失败并说明（deepseek 默认）")
 
 # ---------- 9. base_url 限制 / 重定向 ----------
 print("9. base_url")
 try:
-    OpenRouterClient("m", "k", base_url="https://evil.example.com/v1")
+    OpenRouterClient("m", "k", base_url="https://evil.example.com/v1", provider="openrouter")
     check(False, "自定义 base_url 未加 flag 应拒绝")
 except AiError as e:
     check("allow_custom_base_url" in str(e), "拒绝并提示 flag")
@@ -250,8 +255,49 @@ check(ok is False and limit == 32768, "未知模型按 32k，超预算拒绝")
 ok, est, limit = budget_ok("deepseek/deepseek-v4.1-flash", [{"role": "user", "content": "字" * 40000}], 1000)
 check(ok is True, "1M 上下文放得下")
 os.environ["OPENROUTER_KEY"] = "  sk-test  "
-cfg = load_ai_config({"model": "x/y", "history_turns": -1})
-check(cfg["model"] == "x/y" and cfg["history_turns"] == 10 and cfg["api_key"] == "sk-test" and cfg["base_url"] == ai_chat.DEFAULT_BASE_URL, f"配置读取：{cfg}")
+os.environ["DEEPSEEK_API_KEY"] = "sk-ds"
+cfg = load_ai_config({"provider": "openrouter", "model": "x/y", "history_turns": -1})
+check(cfg["model"] == "x/y" and cfg["history_turns"] == 10 and cfg["api_key"] == "sk-test" and cfg["base_url"] == "https://openrouter.ai/api/v1", f"配置读取 openrouter：{cfg}")
+cfg = load_ai_config({})
+check(cfg["provider"] == "deepseek" and cfg["model"] == "deepseek-flash" and cfg["api_key"] == "sk-ds" and cfg["base_url"] == "https://api.deepseek.com" and cfg["key_env"] == "DEEPSEEK_API_KEY", f"默认 deepseek：{cfg}")
+cfg = load_ai_config({"provider": "nonsense"})
+check(cfg["provider"] == "deepseek", "未知 provider 回默认")
+
+print("13. DeepSeek 费用估算 / 请求体")
+import time as _t
+peak = _t.struct_time((2026, 9, 14, 2, 0, 0, 0, 257, 0))     # 周一 02:00 UTC
+off = _t.struct_time((2026, 9, 14, 12, 0, 0, 0, 257, 0))     # 周一 12:00 UTC
+sat = _t.struct_time((2026, 9, 12, 2, 0, 0, 5, 255, 0))      # 周六 02:00 UTC
+check(ai_chat.is_peak_utc(peak) and not ai_chat.is_peak_utc(off) and not ai_chat.is_peak_utc(sat), "高峰判定")
+u = {"prompt_tokens": 1000, "completion_tokens": 100, "prompt_cache_hit_tokens": 400}
+check(abs(ai_chat.estimate_cost("deepseek-flash", u, peak) - (400*0.006 + 600*0.30 + 100*1.20)/1e6) < 1e-12, "高峰估算：命中/未命中/输出分开算")
+check(abs(ai_chat.estimate_cost("deepseek-flash", u, off) - (400*0.006 + 600*0.30 + 100*1.20)/2e6) < 1e-12, "非高峰半价")
+check(ai_chat.estimate_cost("unknown-model", u) is None, "未知模型 → None")
+check(usage_summary({"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.001}, "deepseek-flash") == (10, 5, None, 0.001), "有实际 cost 优先")
+p_, c_, cached_, cost_ = usage_summary(u, "deepseek-flash")
+check(cached_ == 400 and cost_ is not None, "deepseek usage 用 prompt_cache_hit_tokens，费用为估算")
+check(usage_summary(u)[3] is None, "不给 model 不估")
+# 请求体：deepseek 用 thinking.disabled + stream_options；openrouter 用 reasoning + usage.include
+captured = {}
+class _R:
+    def __init__(self): self.chunks=[sse(delta("x", "stop"), "[DONE]")]
+    def read(self, n): return self.chunks.pop(0) if self.chunks else b""
+    def close(self): pass
+def opener(req, timeout=None):
+    import json as _j
+    captured["body"] = _j.loads(req.data.decode("utf-8")); captured["url"] = req.full_url
+    return _R()
+cd = OpenRouterClient("deepseek-flash", "k")
+cd._opener = type("O", (), {"open": staticmethod(opener)})()
+run_stream(cd, None)
+b = captured["body"]
+check(b.get("thinking") == {"type": "disabled"} and b.get("stream_options") == {"include_usage": True} and "reasoning" not in b and "usage" not in b,
+      f"deepseek 请求体：{ {k: v for k, v in b.items() if k not in ('messages',)} }")
+check(captured["url"] == "https://api.deepseek.com/chat/completions", f"deepseek 地址：{captured['url']}")
+co = client_with(opener)
+run_stream(co, None)
+b = captured["body"]
+check(b.get("reasoning") == {"enabled": False} and b.get("usage") == {"include": True} and "thinking" not in b, "openrouter 请求体不变")
 
 print()
 if FAILS:
