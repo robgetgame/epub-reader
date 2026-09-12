@@ -1,5 +1,7 @@
-ebooklib
-beautifulsoup4
-pywin32
-pygame
-edge-tts
+# 钉版本（2026-09-12，Python 3.13）。edge-tts 尤其要钉：它靠微软非官方端点，升级可能直接失效。
+EbookLib==0.20
+beautifulsoup4==4.15.0
+pywin32==312
+pygame==2.6.1
+edge-tts==7.2.8
+customtkinter==6.0.0

@@ -35,8 +35,25 @@
 * **Concurrency (Critical):** The TTS playback (`engine.say()` and `engine.runAndWait()`) MUST execute on a separate daemon thread via the `threading` module. Do not block the Tkinter main loop.
 * **Packaging:** First, build and rigorously test the Python script to ensure stability and absence of bugs. ONLY after the script is fully functional and verified, autonomously compile it into a standalone Windows executable. Execute `pip install pyinstaller pyttsx3 EbookLib beautifulsoup4` and then run `pyinstaller --onefile --windowed main.py`.
 
-## 3. Claude Code Agentic Directives
+## 3. Agentic Directives
 * **Cognitive Framework:** Operate in High-Level Communication (HLC) mode. Assume a senior-level engineering context.
 * **Zero Fluff:** Omit all conversational filler, apologies, or explanations. Output only functional code and terminal commands.
 * **Code Completeness:** Placeholders (e.g., `# existing code...`) are strictly forbidden. All Python scripts must be fully written and production-ready.
 * **Autonomy:** If a library dependency is missing, install it via `pip`. If PyInstaller compilation fails, read the terminal traceback, diagnose the root cause, and implement the fix natively.
+---
+
+## 附：已被后续决定修订的条目（2026-09-12 起）
+
+上面的正文是 2026 年初生成这个项目时的原始规格，**正文不改**，改动只记在这里。
+设计讨论全文见 `docs/DESIGN-REVIEW-2026-09-12-v2.md`（含附录 A）。
+
+| 原文条目 | 修订 | 日期 / 出处 |
+|---|---|---|
+| Voice Selection：「exactly four premium Neural voices」 | 实际为六个（加 `zh-CN-YunyangNeural`、`en-US-JennyNeural`），以代码 `tts_thread.NEURAL_VOICES` 为准 | 现状，2026-09-12 记录 |
+| TTS Engine：「Utilize `pyttsx3`」 | 实际直接用 `win32com` 调 SAPI，不用 pyttsx3 | 现状，2026-09-12 记录 |
+| Session Bookmarking：「offer to resume」 | 实际为自动恢复，不询问 | 现状，2026-09-12 记录 |
+| Raw Text Sandbox：「Bookmarking for this Sandbox must be kept strictly separate」 | 全局 sandbox 取消，右栏即「当前书当前章的笔记」，位置按 (书, 章) 存 | D18 / §2.1，2026-09-12 本人拍板 |
+| Session Bookmarking：「chapter index」 | 章 = EPUB nav/NCX 一个条目，不是一个 spine 文件；书签存字符偏移 | A.7，2026-09-12 本人拍板 |
+| Edge-TTS Cache：「stored in a local `/temp_audio/` folder」 | 数据与缓存目录改为 `%LOCALAPPDATA%\EpubReader\`，可用 `data_dir` 指向同步目录 | D17 / D23，2026-09-12 本人拍板 |
+| UI/UX：「Tkinter … Dark Mode」 | 界面层改用 CustomTkinter 重写，仍为深色 | D21，2026-09-12 本人拍板 |
+| §3 Agentic Directives：「Zero Fluff … Output only functional code」 | 不适用于后续维护。工作方式按 `docs/DESIGN-REVIEW-2026-09-12-v2.md` §6 / A.8：调查 → 问 → 决定 → 写代码；每步单独提交并附验证脚本 | 2026-09-12 |
