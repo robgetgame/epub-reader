@@ -27,6 +27,9 @@ def _defaults():
         "last_file": None,
         "voice_id": None,
         "speech_rate": 200,
+        "volume": 100,          # D24
+        "font_family": "Microsoft YaHei",   # D22
+        "font_size": 16,
         "bookmarks": {},        # book_key -> {"chapter": int, "offset": int}
         "notes": {},            # book_key -> {chapter_key: text}
         "note_positions": {},   # book_key -> {chapter_key: offset}
@@ -62,6 +65,14 @@ def validate(data):
     rate = data.get("speech_rate", 200)
     if not isinstance(rate, (int, float)) or isinstance(rate, bool):
         problems.append("speech_rate 不是数字")
+    vol = data.get("volume", 100)
+    if not isinstance(vol, (int, float)) or isinstance(vol, bool) or not 0 <= vol <= 100:
+        problems.append("volume 不在 0–100")
+    if not isinstance(data.get("font_family", ""), str):
+        problems.append("font_family 不是字符串")
+    fs = data.get("font_size", 16)
+    if not isinstance(fs, (int, float)) or isinstance(fs, bool) or not 8 <= fs <= 72:
+        problems.append("font_size 不在 8–72")
 
     schema = data.get("schema")
     if schema is None:
@@ -210,9 +221,29 @@ class ConfigManager:
         self.config["last_file"] = file_path
         return self.save()
 
-    def set_voice_and_rate(self, voice_id, rate):
+    def set_voice_and_rate(self, voice_id, rate, volume=None):
         self.config["voice_id"] = voice_id
         self.config["speech_rate"] = rate
+        if volume is not None:
+            self.config["volume"] = int(volume)
+        return self.save()
+
+    def set_font(self, family, size):
+        self.config["font_family"] = family
+        self.config["font_size"] = int(size)
+        return self.save()
+
+    # ---------- 书的类型（D25） ----------
+
+    def get_book_meta(self, book_key):
+        return dict(self.config["book_meta"].get(book_key) or {})
+
+    def set_book_kind(self, book_key, kind, source, language=None):
+        meta = self.config["book_meta"].setdefault(book_key, {})
+        meta["kind"] = kind
+        meta["kind_source"] = source
+        if language:
+            meta["language"] = language
         return self.save()
 
     # ---------- 书签（章序号 + 字符偏移） ----------

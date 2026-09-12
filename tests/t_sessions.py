@@ -50,7 +50,8 @@ def m_stop():
 
 
 mixer.init = m_init
-mixer.music = types.SimpleNamespace(load=m_load, play=m_play, get_busy=m_busy, stop=m_stop, unload=lambda: None)
+mixer.music = types.SimpleNamespace(load=m_load, play=m_play, get_busy=m_busy, stop=m_stop, unload=lambda: None,
+                                    set_volume=lambda v: music_state.__setitem__("volume", v))
 fake_pygame.mixer = mixer
 sys.modules["pygame"] = fake_pygame
 

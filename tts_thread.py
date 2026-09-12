@@ -298,6 +298,7 @@ class TTSWorker(threading.Thread):
         self._settings_lock = threading.Lock()
         self._voice_id = None
         self._rate = 200
+        self._volume = 100          # 0–100（D24）
 
         self.speaker = None
         self.voices = []
@@ -309,14 +310,30 @@ class TTSWorker(threading.Thread):
 
     # ---------- UI 线程调用 ----------
 
-    def set_settings(self, voice_id, rate):
+    def set_settings(self, voice_id, rate, volume=None):
         with self._settings_lock:
             self._voice_id = voice_id
             self._rate = int(rate)
+            if volume is not None:
+                self._volume = max(0, min(100, int(volume)))
+                vol = self._volume
+            else:
+                vol = None
+        # pygame 的音量从任何线程设都安全，正在放的这句立刻生效；SAPI 的等 worker 下一句重读
+        if vol is not None and self._mixer_ok:
+            try:
+                import pygame
+                pygame.mixer.music.set_volume(vol / 100)
+            except Exception:
+                pass
 
     def _get_settings(self):
         with self._settings_lock:
             return self._voice_id, self._rate
+
+    def _get_volume(self):
+        with self._settings_lock:
+            return self._volume
 
     def play(self, sentences, start_idx=0, target="epub", end_idx=None):
         """取消一切在跑的，登记新 session，入队。返回 session id。"""
@@ -512,6 +529,7 @@ class TTSWorker(threading.Thread):
         try:
             import pygame
             pygame.mixer.music.load(path)
+            pygame.mixer.music.set_volume(self._get_volume() / 100)
             pygame.mixer.music.play()
             while pygame.mixer.music.get_busy():
                 if session.cancel.is_set():
@@ -531,6 +549,7 @@ class TTSWorker(threading.Thread):
             return "本机语音不可用"
         try:
             self.speaker.Rate = sapi_rate
+            self.speaker.Volume = self._get_volume()
             voices_obj = self.speaker.GetVoices()
             for i in range(voices_obj.Count):
                 if voices_obj.Item(i).Id == voice:

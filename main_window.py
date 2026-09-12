@@ -1,4 +1,8 @@
-"""主窗口。第 3 步（2026-09-12）重写了状态模型，界面还是旧的 ttk，第 6.5 步换 CustomTkinter。
+"""主窗口。第 3 步（2026-09-12）重写了状态模型，第 6.5 步换成 CustomTkinter 界面（D21–D26）。
+
+界面层的原则：正文区和笔记区仍然是 tk.Text（放在 CTkFrame 里配 CTkScrollbar）——
+CustomTkinter 的 CTkTextbox 底下也是 tk.Text，但句子 tag、偏移定位、<<Modified>> 这些全在
+tk.Text 的 API 上，直接用它最稳。其余控件（按钮、下拉、滑块、顶栏、底栏）是 CustomTkinter。
 
 三个身份（设计文档 §2）：
 - 笔记身份 displayed_note = (book_key, chapter_key)：右栏现在显示的是谁的笔记。
@@ -17,7 +21,10 @@ import os
 import queue
 import re
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+import tkinter.font as tkfont
+from tkinter import filedialog, messagebox
+
+import customtkinter as ctk
 
 import paths
 from config_manager import ConfigManager, SCRATCH_BOOK
@@ -35,6 +42,31 @@ TAG_TO_VOICE = {
     'jenny': 'en-US-JennyNeural',
 }
 _TAG_RE = re.compile(r'\{(/?)([a-zA-Z]+)\}')
+
+# 字体候选（D22）。Tk 在 Windows 上报的是英文名；显示用中文。启动时用 tkfont.families() 过滤掉没装的。
+FONT_CHOICES = [
+    ("微软雅黑", "Microsoft YaHei"),
+    ("楷体", "KaiTi"),
+    ("宋体", "SimSun"),
+    ("等线", "DengXian"),
+    ("Segoe UI", "Segoe UI"),
+    ("Georgia", "Georgia"),
+    ("Cambria", "Cambria"),
+]
+KIND_LABELS = {"fiction": "小说", "nonfiction": "非虚构"}
+KIND_UNSET = "未判定"
+
+# 配色：CustomTkinter dark-blue 主题的底色 + 正文用的深灰；高亮金色沿用旧版
+BG = "#1b1b1b"
+BG_PANEL = "#202020"
+BG_TEXT = "#1e1e1e"
+BG_NOTE = "#1f1f22"
+FG = "#d4d4d4"
+FG_DIM = "#8a8a8a"
+HL_BG = "#b8860b"
+HL_FG = "#ffffff"
+ACCENT = "#7a5c1e"
+ACCENT_HOVER = "#8f6d25"
 
 
 def parse_note_text(raw_text, split):
@@ -67,21 +99,17 @@ class MainWindow:
         self.root = root
         # layout 为 None 只在旧测试脚本里出现：退回 portable（程序目录）
         self.layout = layout or paths.resolve_layout(portable=True)
-        self.root.title("Native EPUB TTS Reader")
-        self.root.geometry("1400x800")
+        self.root.title("EPUB Reader")
+        self.root.geometry("1400x820")
+        self.root.minsize(1000, 600)
 
-        self.bg_color = "#1e1e1e"
-        self.fg_color = "#d4d4d4"
-        self.highlight_bg = "#b8860b"
-        self.highlight_fg = "#ffffff"
-        self.root.configure(bg=self.bg_color)
-
-        style = ttk.Style()
-        style.theme_use('clam')
-        style.configure('TFrame', background=self.bg_color)
-        style.configure('TLabel', background=self.bg_color, foreground=self.fg_color)
-        style.configure('TButton', background="#333333", foreground=self.fg_color, borderwidth=1)
-        style.map('TButton', background=[('active', '#555555')])
+        # 外观模式在 main.py 建根窗口前设；这里不再调 set_appearance_mode ——
+        # 它会遍历 CustomTkinter 登记过的所有控件，测试里换根窗口时会碰到已销毁的
+        self.bg_color = BG
+        self.fg_color = FG
+        self.highlight_bg = HL_BG
+        self.highlight_fg = HL_FG
+        self.root.configure(bg=BG)
 
         # 先把旧位置的数据搬进数据目录（只复制不删），再读。搬运结果要告诉使用者。
         self.startup_notes = list(self.layout.notes)
@@ -127,6 +155,16 @@ class MainWindow:
         self.sapi_voices = []
         self.voices_ready = False
 
+        # 字体（D22）：只列装了的
+        installed = set()
+        try:
+            installed = set(tkfont.families())
+        except tk.TclError:
+            pass
+        self.font_choices = [(label, fam) for label, fam in FONT_CHOICES if fam in installed] or [FONT_CHOICES[0]]
+        self.font_label_to_family = dict(self.font_choices)
+        self.font_family_to_label = {fam: label for label, fam in self.font_choices}
+
         self._build_ui()
         self._setup_keybinds()
         self._load_voices()
@@ -147,99 +185,246 @@ class MainWindow:
     # ---------- UI ----------
 
     def _build_ui(self):
-        menubar = tk.Menu(self.root, bg=self.bg_color, fg=self.fg_color)
-        file_menu = tk.Menu(menubar, tearoff=0, bg=self.bg_color, fg=self.fg_color)
-        file_menu.add_command(label="Open EPUB...", command=self._open_file_dialog)
-        self.recent_menu = tk.Menu(file_menu, tearoff=0, bg=self.bg_color, fg=self.fg_color)
-        file_menu.add_cascade(label="Recent Files", menu=self.recent_menu)
+        root = self.root
+        root.grid_columnconfigure(0, weight=1)
+        root.grid_rowconfigure(1, weight=1)
+
+        # ===== 顶栏 =====
+        top = ctk.CTkFrame(root, fg_color=BG_PANEL, corner_radius=0, height=44)
+        top.grid(row=0, column=0, sticky="ew")
+        ctk.CTkButton(top, text="打开…", width=70, command=self._open_file_dialog).pack(side="left", padx=(12, 4), pady=8)
+        self.recent_btn = ctk.CTkButton(top, text="最近 ▾", width=70, fg_color="#2c2c2c", hover_color="#3a3a3a",
+                                        command=self._post_recent_menu)
+        self.recent_btn.pack(side="left", padx=4, pady=8)
+        self.recent_menu = tk.Menu(root, tearoff=0, bg="#2a2a2a", fg=FG, activebackground="#3a3a3a", activeforeground="#fff", bd=0)
         self._update_recent_menu()
-        file_menu.add_separator()
-        file_menu.add_command(label="旧笔记（升级前的数据）...", command=self._show_legacy_notes)
-        file_menu.add_command(label="导入旧数据文件...", command=self._import_legacy_dialog)
-        file_menu.add_command(label="打开数据目录", command=lambda: paths.open_in_explorer(self.layout.data))
-        file_menu.add_command(label="打开导出目录", command=lambda: paths.open_in_explorer(self.layout.export))
-        file_menu.add_separator()
-        file_menu.add_command(label="Exit", command=self._on_close)
-        menubar.add_cascade(label="File", menu=file_menu)
-        self.root.config(menu=menubar)
+        self.book_title_var = tk.StringVar(value="没有打开的书")
+        ctk.CTkLabel(top, textvariable=self.book_title_var, font=ctk.CTkFont(size=14, weight="bold")).pack(side="left", padx=(16, 4))
+        self.chapter_title_var = tk.StringVar(value="")
+        ctk.CTkLabel(top, textvariable=self.chapter_title_var, text_color=FG_DIM).pack(side="left", padx=4)
+        for text, cmd in (("导出目录", lambda: paths.open_in_explorer(self.layout.export)),
+                          ("数据目录", lambda: paths.open_in_explorer(self.layout.data)),
+                          ("旧笔记", self._show_legacy_notes)):
+            ctk.CTkButton(top, text=text, width=76, fg_color="#2c2c2c", hover_color="#3a3a3a", command=cmd).pack(side="right", padx=4, pady=8)
 
-        paned = tk.PanedWindow(self.root, orient=tk.HORIZONTAL, bg=self.bg_color, bd=0, sashwidth=4)
-        paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # ===== 三栏 =====
+        paned = tk.PanedWindow(root, orient=tk.HORIZONTAL, bg=BG, bd=0, sashwidth=5, sashrelief="flat")
+        paned.grid(row=1, column=0, sticky="nsew", padx=0, pady=0)
 
-        # 左：目录
-        left_frame = ttk.Frame(paned)
-        paned.add(left_frame, minsize=200)
-        ttk.Label(left_frame, text="Contents", font=("Arial", 12, "bold")).pack(anchor=tk.W, pady=5)
-        self.toc_listbox = tk.Listbox(left_frame, bg="#2d2d2d", fg=self.fg_color,
-                                      selectbackground=self.highlight_bg, selectforeground=self.highlight_fg,
-                                      borderwidth=0, highlightthickness=0,
-                                      font=("Arial", 10), exportselection=False)
-        self.toc_listbox.pack(fill=tk.BOTH, expand=True)
+        # --- 左：目录 ---
+        left = ctk.CTkFrame(paned, fg_color="#181818", corner_radius=0)
+        paned.add(left, minsize=200, width=250, stretch="never")
+        self.toc_filter_var = tk.StringVar()
+        self.toc_filter_var.trace_add("write", lambda *a: self._apply_toc_filter())
+        self.toc_search = ctk.CTkEntry(left, placeholder_text="搜章名…", textvariable=self.toc_filter_var)
+        self.toc_search.pack(fill="x", padx=10, pady=(10, 6))
+        toc_wrap = ctk.CTkFrame(left, fg_color="transparent")
+        toc_wrap.pack(fill="both", expand=True, padx=(10, 4), pady=(0, 10))
+        self.toc_listbox = tk.Listbox(toc_wrap, bg="#181818", fg="#bbbbbb", selectbackground="#2f2f2f", selectforeground="#ffffff",
+                                      borderwidth=0, highlightthickness=0, activestyle="none",
+                                      font=("Microsoft YaHei", 11), exportselection=False)
+        toc_sb = ctk.CTkScrollbar(toc_wrap, command=self.toc_listbox.yview)
+        self.toc_listbox.configure(yscrollcommand=toc_sb.set)
+        toc_sb.pack(side="right", fill="y")
+        self.toc_listbox.pack(side="left", fill="both", expand=True)
         self.toc_listbox.bind("<<ListboxSelect>>", self._on_toc_select)
+        self._toc_visible = []      # 过滤后列表里每一行对应的章序号
 
-        # 中：正文
-        mid_frame = ttk.Frame(paned)
-        paned.add(mid_frame, minsize=400)
-        ttk.Label(mid_frame, text="EPUB Reader", font=("Arial", 12, "bold")).pack(anchor=tk.W, pady=5)
-        # spacing3：段落之间留空。原来是靠把每句后面塞两个换行，现在正文按原样渲染，用样式留空
-        self.text_area = tk.Text(mid_frame, bg=self.bg_color, fg=self.fg_color,
-                                 font=("Microsoft YaHei", 12), wrap=tk.WORD,
-                                 padx=20, pady=20, borderwidth=0, highlightthickness=0, spacing3=10)
-        self.text_area.pack(fill=tk.BOTH, expand=True)
-        self.text_area.tag_configure("highlight", background=self.highlight_bg, foreground=self.highlight_fg)
-        self.text_area.config(state=tk.DISABLED)   # 只读靠 state，不再拦 <Key>（那会把 Ctrl+C 也拦掉）
+        # --- 中：正文 + 播放条 ---
+        mid = ctk.CTkFrame(paned, fg_color=BG, corner_radius=0)
+        paned.add(mid, minsize=400, stretch="always")   # 富余空间全给正文，不给最后一栏
+        mid.grid_rowconfigure(0, weight=1)
+        mid.grid_columnconfigure(0, weight=1)
+        text_wrap = ctk.CTkFrame(mid, fg_color="transparent")
+        text_wrap.grid(row=0, column=0, sticky="nsew")
+        self.text_area = tk.Text(text_wrap, bg=BG_TEXT, fg=FG, wrap=tk.WORD, padx=36, pady=24,
+                                 borderwidth=0, highlightthickness=0, spacing3=10, insertbackground=FG,
+                                 selectbackground="#3b6ea5", selectforeground="#fff")
+        text_sb = ctk.CTkScrollbar(text_wrap, command=self.text_area.yview)
+        self.text_area.configure(yscrollcommand=text_sb.set)
+        text_sb.pack(side="right", fill="y", pady=8)
+        self.text_area.pack(side="left", fill="both", expand=True)
+        self.text_area.tag_configure("highlight", background=HL_BG, foreground=HL_FG)
+        self.text_area.config(state=tk.DISABLED)   # 只读靠 state，不拦 <Key>（Ctrl+C 要能用）
 
-        epub_controls = ttk.Frame(mid_frame)
-        epub_controls.pack(fill=tk.X, pady=10)
-        ttk.Button(epub_controls, text="<< Prev", command=self._prev_chapter).pack(side=tk.LEFT, padx=2)
-        self.play_btn = ttk.Button(epub_controls, text="Play", command=self._toggle_play)
-        self.play_btn.pack(side=tk.LEFT, padx=2)
-        ttk.Button(epub_controls, text="Next >>", command=self._next_chapter).pack(side=tk.LEFT, padx=2)
-        ttk.Button(epub_controls, text="Export MP3", command=self._export_mp3_ui).pack(side=tk.LEFT, padx=15)
+        transport = ctk.CTkFrame(mid, fg_color=BG_PANEL, corner_radius=0, height=46)
+        transport.grid(row=1, column=0, sticky="ew")
+        ctk.CTkButton(transport, text="◀ 上一章", width=90, fg_color="#2c2c2c", hover_color="#3a3a3a", command=self._prev_chapter).pack(side="left", padx=(20, 4), pady=8)
+        self.play_btn = ctk.CTkButton(transport, text="▶ 播放", width=110, font=ctk.CTkFont(size=13, weight="bold"), command=self._toggle_play)
+        self.play_btn.pack(side="left", padx=4, pady=8)
+        ctk.CTkButton(transport, text="下一章 ▶", width=90, fg_color="#2c2c2c", hover_color="#3a3a3a", command=self._next_chapter).pack(side="left", padx=4, pady=8)
+        ctk.CTkButton(transport, text="导出 mp3", width=90, fg_color="#2c2c2c", hover_color="#3a3a3a", command=self._export_mp3_ui).pack(side="right", padx=20, pady=8)
 
-        # 右：本章笔记
-        right_frame = ttk.Frame(paned)
-        paned.add(right_frame, minsize=350)
-        title_frame = ttk.Frame(right_frame)
-        title_frame.pack(fill=tk.X, pady=5)
-        self.note_title = ttk.Label(title_frame, text="Chapter Note", font=("Arial", 12, "bold"))
-        self.note_title.pack(side=tk.LEFT)
+        # --- 右：笔记 ---
+        right = ctk.CTkFrame(paned, fg_color=BG_NOTE, corner_radius=0)
+        paned.add(right, minsize=320, width=400, stretch="never")
+        right.grid_rowconfigure(1, weight=1)
+        right.grid_columnconfigure(0, weight=1)
+        hdr = ctk.CTkFrame(right, fg_color="transparent")
+        hdr.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 4))
+        self.note_title_var = tk.StringVar(value="草稿")
+        ctk.CTkLabel(hdr, textvariable=self.note_title_var, font=ctk.CTkFont(size=13, weight="bold")).pack(side="left")
+        self.note_state_var = tk.StringVar(value="")
+        ctk.CTkLabel(hdr, textvariable=self.note_state_var, text_color=FG_DIM).pack(side="left", padx=6)
+        # 书的类型（D25）：一本书选一次；AI 讲解（第 8 步）按它选结构
+        self.kind_var = tk.StringVar(value=KIND_UNSET)
+        self.kind_menu = ctk.CTkOptionMenu(hdr, variable=self.kind_var, values=[KIND_UNSET] + list(KIND_LABELS.values()),
+                                           width=96, command=self._on_kind_change, fg_color="#2c2c2c", button_color="#3a3a3a")
+        self.kind_menu.pack(side="right")
+        ctk.CTkLabel(hdr, text="类型", text_color=FG_DIM).pack(side="right", padx=(8, 6))
 
-        self.sandbox_area = tk.Text(right_frame, bg="#252526", fg=self.fg_color,
-                                    font=("Microsoft YaHei", 12), wrap=tk.WORD,
-                                    padx=20, pady=20, borderwidth=0, highlightthickness=0, undo=True)
-        self.sandbox_area.pack(fill=tk.BOTH, expand=True)
-        self.sandbox_area.tag_configure("highlight", background=self.highlight_bg, foreground=self.highlight_fg)
+        note_wrap = ctk.CTkFrame(right, fg_color="transparent")
+        note_wrap.grid(row=1, column=0, sticky="nsew", padx=(8, 4))
+        self.sandbox_area = tk.Text(note_wrap, bg="#252528", fg=FG, wrap=tk.WORD, padx=16, pady=16,
+                                    borderwidth=0, highlightthickness=0, undo=True, insertbackground=FG,
+                                    selectbackground="#3b6ea5", selectforeground="#fff")
+        note_sb = ctk.CTkScrollbar(note_wrap, command=self.sandbox_area.yview)
+        self.sandbox_area.configure(yscrollcommand=note_sb.set)
+        note_sb.pack(side="right", fill="y")
+        self.sandbox_area.pack(side="left", fill="both", expand=True)
+        self.sandbox_area.tag_configure("highlight", background=HL_BG, foreground=HL_FG)
         self.sandbox_area.bind("<<Modified>>", self._on_note_modified)
         self.sandbox_area.bind("<FocusOut>", lambda e: self._save_displayed_note())
 
-        sandbox_controls = ttk.Frame(right_frame)
-        sandbox_controls.pack(fill=tk.X, pady=10)
-        self.sandbox_play_btn = ttk.Button(sandbox_controls, text="Play Note", command=self._toggle_sandbox_play)
-        self.sandbox_play_btn.pack(side=tk.LEFT, padx=2)
-        ttk.Button(sandbox_controls, text="Clear", command=self._clear_sandbox).pack(side=tk.RIGHT, padx=2)
+        foot = ctk.CTkFrame(right, fg_color="transparent")
+        foot.grid(row=2, column=0, sticky="ew", padx=12, pady=8)
+        self.sandbox_play_btn = ctk.CTkButton(foot, text="▶ 播放笔记", width=100, fg_color="#2c2c2c", hover_color="#3a3a3a", command=self._toggle_sandbox_play)
+        self.sandbox_play_btn.pack(side="left")
+        ctk.CTkButton(foot, text="清空", width=60, fg_color="#2c2c2c", hover_color="#3a3a3a", command=self._clear_sandbox).pack(side="right")
 
-        # 底：设置 + 状态栏
-        settings_frame = ttk.Frame(self.root)
-        settings_frame.pack(fill=tk.X, padx=10, pady=5)
-        ttk.Label(settings_frame, text="Voice:").pack(side=tk.LEFT, padx=5)
+        # ===== 底栏：设置 + 状态 =====
+        bottom = ctk.CTkFrame(root, fg_color=BG_PANEL, corner_radius=0, height=40)
+        bottom.grid(row=2, column=0, sticky="ew")
+
+        def lab(text):
+            ctk.CTkLabel(bottom, text=text, text_color=FG_DIM).pack(side="left", padx=(12, 4))
+
+        lab("音色")
         self.voice_var = tk.StringVar()
-        self.voice_combo = ttk.Combobox(settings_frame, textvariable=self.voice_var, state="readonly", width=30)
-        self.voice_combo.pack(side=tk.LEFT, padx=5)
-        self.voice_combo.bind("<<ComboboxSelected>>", self._on_settings_change)
-        ttk.Label(settings_frame, text="Speed:").pack(side=tk.LEFT, padx=5)
-        self.speed_var = tk.IntVar(value=self.config.config.get("speech_rate", 200))
-        self.speed_slider = ttk.Scale(settings_frame, from_=50, to=400, variable=self.speed_var)
-        self.speed_slider.pack(side=tk.LEFT, padx=5)
-        # 松手才存盘；拖动过程中每一格都写盘是 B9 里那条
-        self.speed_slider.bind("<ButtonRelease-1>", self._on_settings_change)
+        self.voice_menu = ctk.CTkOptionMenu(bottom, variable=self.voice_var, values=[""], width=230,
+                                            command=lambda v: self._on_settings_change(), fg_color="#2c2c2c", button_color="#3a3a3a")
+        self.voice_menu.pack(side="left", pady=6)
+
+        lab("语速")
+        self.speed_var = tk.IntVar(value=int(self.config.config.get("speech_rate", 200)))
+        self.speed_slider = ctk.CTkSlider(bottom, from_=50, to=400, width=120, variable=self.speed_var,
+                                          command=lambda v: self.speed_value_var.set(str(int(float(v)))))
+        self.speed_slider.pack(side="left", pady=6)
+        self.speed_slider.bind("<ButtonRelease-1>", self._on_settings_change)   # 松手才存盘
+        self.speed_value_var = tk.StringVar(value=str(self.speed_var.get()))
+        ctk.CTkLabel(bottom, textvariable=self.speed_value_var, width=32).pack(side="left")
+
+        lab("音量")
+        self.volume_var = tk.IntVar(value=int(self.config.config.get("volume", 100)))
+        self.volume_slider = ctk.CTkSlider(bottom, from_=0, to=100, width=100, variable=self.volume_var,
+                                           command=self._on_volume_drag)
+        self.volume_slider.pack(side="left", pady=6)
+        self.volume_slider.bind("<ButtonRelease-1>", self._on_settings_change)
+        self.volume_value_var = tk.StringVar(value=str(self.volume_var.get()))
+        ctk.CTkLabel(bottom, textvariable=self.volume_value_var, width=32).pack(side="left")
+
+        lab("字体")
+        saved_family = self.config.config.get("font_family") or FONT_CHOICES[0][1]
+        self.font_var = tk.StringVar(value=self.font_family_to_label.get(saved_family, self.font_choices[0][0]))
+        self.font_menu = ctk.CTkOptionMenu(bottom, variable=self.font_var, values=[l for l, _ in self.font_choices], width=110,
+                                           command=lambda v: self._on_font_change(), fg_color="#2c2c2c", button_color="#3a3a3a")
+        self.font_menu.pack(side="left", pady=6)
+        lab("字号")
+        self.font_size_var = tk.IntVar(value=int(self.config.config.get("font_size", 16)))
+        self.font_size_slider = ctk.CTkSlider(bottom, from_=12, to=28, number_of_steps=16, width=100, variable=self.font_size_var,
+                                              command=lambda v: self._on_font_change(save=False))
+        self.font_size_slider.pack(side="left", pady=6)
+        self.font_size_slider.bind("<ButtonRelease-1>", lambda e: self._on_font_change(save=True))
+        self.font_size_value_var = tk.StringVar(value=str(self.font_size_var.get()))
+        ctk.CTkLabel(bottom, textvariable=self.font_size_value_var, width=28).pack(side="left")
 
         self.status_var = tk.StringVar(value="")
-        status = ttk.Label(self.root, textvariable=self.status_var, anchor=tk.W, cursor="hand2")
-        status.pack(fill=tk.X, padx=10, pady=(0, 4))
+        status = ctk.CTkLabel(bottom, textvariable=self.status_var, text_color="#8fbf8f", anchor="e", cursor="hand2")
+        status.pack(side="right", padx=14, fill="x", expand=True)
         status.bind("<Button-1>", lambda e: self._show_skipped_log())
 
+        self._apply_fonts()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _post_recent_menu(self):
+        try:
+            x = self.recent_btn.winfo_rootx()
+            y = self.recent_btn.winfo_rooty() + self.recent_btn.winfo_height()
+            self.recent_menu.tk_popup(x, y)
+        finally:
+            self.recent_menu.grab_release()
+
+    def _apply_toc_filter(self):
+        """目录搜索：只列标题含关键字的章，选中仍映射回真实章序号。"""
+        key = self.toc_filter_var.get().strip().lower()
+        self.toc_listbox.delete(0, tk.END)
+        self._toc_visible = []
+        for ch in self.parser.get_chapter_list():
+            if not key or key in ch.title.lower():
+                self.toc_listbox.insert(tk.END, ch.title)
+                self._toc_visible.append(ch.index)
+        self._select_toc_row(self.current_chapter_idx)
+
+    def _select_toc_row(self, chapter_idx):
+        self.toc_listbox.selection_clear(0, tk.END)
+        if chapter_idx in self._toc_visible:
+            row = self._toc_visible.index(chapter_idx)
+            self.toc_listbox.selection_set(row)
+            self.toc_listbox.see(row)
+
+    # ---------- 字体 / 音量 / 类型 ----------
+
+    def _apply_fonts(self):
+        family = self.font_label_to_family.get(self.font_var.get(), FONT_CHOICES[0][1])
+        size = int(self.font_size_var.get())
+        self.text_area.configure(font=(family, size))
+        self.sandbox_area.configure(font=(family, max(10, size - 2)))
+        self.font_size_value_var.set(str(size))
+
+    def _on_font_change(self, save=True):
+        self._apply_fonts()
+        if save:
+            family = self.font_label_to_family.get(self.font_var.get(), FONT_CHOICES[0][1])
+            self.config.set_font(family, int(self.font_size_var.get()))
+
+    def _on_volume_drag(self, value):
+        v = int(float(value))
+        self.volume_value_var.set(str(v))
+        voice_id, rate = self._current_voice_and_rate()
+        self.tts.set_settings(voice_id, rate, v)   # 拖的过程中就生效（pygame 立即，SAPI 下一句）
+
+    def _kind_label(self, kind):
+        return KIND_LABELS.get(kind, KIND_UNSET)
+
+    def _refresh_kind_menu(self):
+        if self.book_key is None:
+            self.kind_var.set(KIND_UNSET)
+            self.kind_menu.configure(state="disabled")
+            return
+        self.kind_menu.configure(state="normal")
+        self.kind_var.set(self._kind_label(self.config.get_book_meta(self.book_key).get("kind")))
+
+    def _on_kind_change(self, label):
+        if self.book_key is None:
+            return
+        for kind, lab in KIND_LABELS.items():
+            if lab == label:
+                self.config.set_book_kind(self.book_key, kind, "manual")
+                return
+        # 选回「未判定」：删掉记录，AI 下次会重新判
+        meta = self.config.config["book_meta"].get(self.book_key)
+        if meta:
+            meta.pop("kind", None)
+            meta.pop("kind_source", None)
+            self.config.save()
+
+    def _update_note_header(self):
+        if self.displayed_note is None:
+            return
+        book, chapter = self.displayed_note
+        # 不写「第 N 章」：目录序号和书名里的章号（封面、序言占了前几个）对不上，会误导
+        self.note_title_var.set("草稿（没开书）" if book == SCRATCH_BOOK else "本章笔记")
+        self.note_state_var.set("· 未保存" if self.note_dirty else "· 已保存")
 
     def _set_status(self, text):
         self.status_var.set(text)
@@ -254,7 +439,7 @@ class MainWindow:
         w = self.root.focus_get()
         if w is None:
             return False
-        if w is self.sandbox_area or isinstance(w, (tk.Entry, ttk.Entry, ttk.Combobox)):
+        if w is self.sandbox_area or isinstance(w, tk.Entry):   # CTkEntry 内部就是 tk.Entry
             return True
         return isinstance(w, tk.Text) and str(w.cget("state")) == "normal"
 
@@ -275,14 +460,17 @@ class MainWindow:
 
     def _update_recent_menu(self):
         self.recent_menu.delete(0, tk.END)
-        for path in self.config.config.get("recent_files", []):
+        recent = self.config.config.get("recent_files", [])
+        if not recent:
+            self.recent_menu.add_command(label="（没有最近打开的书）", state="disabled")
+        for path in recent:
             self.recent_menu.add_command(label=os.path.basename(path), command=lambda p=path: self._load_epub(p))
 
     def _load_voices(self):
         """神经音色立刻可选；本机语音等 worker 发 ready 再补进来（B8：启动不等 COM）。"""
-        voices = [(nv, nv + " (High Quality Online Neural)") for nv in NEURAL_VOICES] + list(self.sapi_voices)
+        voices = [(nv, nv.replace("Neural", "") + "（在线）") for nv in NEURAL_VOICES] + list(self.sapi_voices)
         self.voice_map = {name: vid for vid, name in voices}
-        self.voice_combo['values'] = list(self.voice_map.keys())
+        self.voice_menu.configure(values=list(self.voice_map.keys()))
         saved_voice = self.config.config.get("voice_id")
         selected_name = None
         if saved_voice:
@@ -291,19 +479,22 @@ class MainWindow:
                     selected_name = name
                     break
         if selected_name:
-            self.voice_combo.set(selected_name)
-        elif voices and not self.voice_combo.get():
-            self.voice_combo.set(voices[0][1])
+            self.voice_var.set(selected_name)
+        elif voices and self.voice_var.get() not in self.voice_map:
+            self.voice_var.set(voices[0][1])
         self._push_settings()
 
     def _push_settings(self):
         voice_id, rate = self._current_voice_and_rate()
-        self.tts.set_settings(voice_id, rate)
+        self.tts.set_settings(voice_id, rate, int(self.volume_var.get()))
 
     def _on_settings_change(self, event=None):
         voice_id, rate = self._current_voice_and_rate()
-        self.config.set_voice_and_rate(voice_id, rate)
-        self.tts.set_settings(voice_id, rate)   # 播放中也生效：worker 每句重读
+        volume = int(self.volume_var.get())
+        self.speed_value_var.set(str(rate))
+        self.volume_value_var.set(str(volume))
+        self.config.set_voice_and_rate(voice_id, rate, volume)
+        self.tts.set_settings(voice_id, rate, volume)   # 播放中也生效：worker 每句重读
 
     def _current_voice_and_rate(self):
         return self.voice_map.get(self.voice_var.get()), int(float(self.speed_var.get()))
@@ -356,6 +547,7 @@ class MainWindow:
             return
         self.note_dirty = True
         self.note_revisions[self.displayed_note] = self.note_revisions.get(self.displayed_note, 0) + 1
+        self._update_note_header()
         # 文本变了，朗读位置就没意义了；播着的话立刻停（A.2）
         if self.is_playing_sandbox:
             self._stop_play_sandbox()
@@ -382,6 +574,7 @@ class MainWindow:
         book, chapter = self.displayed_note
         if self.config.set_note(book, chapter, self._note_text()):
             self.note_dirty = False
+            self._update_note_header()
             return True
         self._set_status(f"笔记没保存：{self.config.last_error}")
         return False
@@ -403,10 +596,7 @@ class MainWindow:
         self._set_note_widget_text(self.config.get_note(book, chapter))
         self.displayed_note = note_id
         self.note_dirty = False
-        if book == SCRATCH_BOOK:
-            self.note_title.config(text="草稿（没开书）")
-        else:
-            self.note_title.config(text=f"第 {int(chapter) + 1} 章笔记")
+        self._update_note_header()
         return True
 
     def _mutate_note(self, new_text, source):
@@ -445,9 +635,10 @@ class MainWindow:
         self.config.add_recent_file(file_path)
         self._update_recent_menu()
 
-        self.toc_listbox.delete(0, tk.END)
-        for ch in self.parser.get_chapter_list():
-            self.toc_listbox.insert(tk.END, ch.title)
+        self.book_title_var.set(os.path.basename(file_path).replace(".epub", ""))
+        self.toc_filter_var.set("")
+        self._apply_toc_filter()
+        self._refresh_kind_menu()
 
         chapter, offset = self.config.get_bookmark(file_path)
         if chapter >= len(self.parser.chapters):
@@ -468,9 +659,8 @@ class MainWindow:
         self.chapter_text, self.current_sentences = self.parser.get_chapter_sentences(index)
         self.current_book_name = os.path.basename(self.book_key).replace(".epub", "")
 
-        self.toc_listbox.selection_clear(0, tk.END)
-        self.toc_listbox.selection_set(index)
-        self.toc_listbox.see(index)
+        self._select_toc_row(index)
+        self.chapter_title_var.set("· " + self.parser.chapters[index].title)
 
         self._render_sentences(self.text_area, self.chapter_text, self.current_sentences, editable=False)
 
@@ -485,11 +675,13 @@ class MainWindow:
 
     def _on_toc_select(self, event):
         selection = self.toc_listbox.curselection()
-        if selection and selection[0] != self.current_chapter_idx:
-            if not self._load_chapter(selection[0]):
+        if not selection or selection[0] >= len(self._toc_visible):
+            return
+        idx = self._toc_visible[selection[0]]
+        if idx != self.current_chapter_idx:
+            if not self._load_chapter(idx):
                 # 切换被拒（笔记没存）：把目录选中项放回去，别让界面说谎
-                self.toc_listbox.selection_clear(0, tk.END)
-                self.toc_listbox.selection_set(self.current_chapter_idx)
+                self._select_toc_row(self.current_chapter_idx)
 
     def _prev_chapter(self):
         if self.book_key is not None and self.current_chapter_idx > 0:
@@ -535,7 +727,7 @@ class MainWindow:
         self._cancel_auto_next()
         self.is_playing = True
         self.is_playing_sandbox = False
-        self.play_btn.config(text="Pause")
+        self.play_btn.configure(text="⏸ 暂停")
         self._push_settings()
         self.active_target = "epub"
         self.active_session = self.tts.play([{"text": s.text, "spoken": s.spoken} for s in self.current_sentences],
@@ -545,7 +737,7 @@ class MainWindow:
         self._cancel_auto_next()
         if self.is_playing:
             self.is_playing = False
-            self.play_btn.config(text="Play")
+            self.play_btn.configure(text="▶ 播放")
             self.active_session = None
             self.tts.stop()
             self._save_epub_bookmark()
@@ -587,7 +779,7 @@ class MainWindow:
 
         self._cancel_auto_next()
         self.is_playing_sandbox = True
-        self.sandbox_play_btn.config(text="Pause Note")
+        self.sandbox_play_btn.configure(text="⏸ 暂停笔记")
         self._push_settings()
         self.active_target = "note"
         self.active_session = self.tts.play(self.note_sentences, self.note_sentence_idx, target="note")
@@ -601,7 +793,7 @@ class MainWindow:
     def _stop_play_sandbox(self):
         if self.is_playing_sandbox:
             self.is_playing_sandbox = False
-            self.sandbox_play_btn.config(text="Play Note")
+            self.sandbox_play_btn.configure(text="▶ 播放笔记")
             self.active_session = None
             self.tts.stop()
             if self.displayed_note and self.note_sentences:
@@ -616,38 +808,39 @@ class MainWindow:
 
     def _show_legacy_notes(self):
         legacy = self.config.legacy()
-        if not legacy:
-            messagebox.showinfo("旧笔记", "这个数据文件不是从旧版升级来的，没有旧笔记。")
-            return
-        win = tk.Toplevel(self.root)
+        win = ctk.CTkToplevel(self.root)
         win.title("旧笔记（升级前的数据，只读）")
-        win.geometry("900x600")
-        win.configure(bg=self.bg_color)
+        win.geometry("940x620")
         win.transient(self.root)
 
         entries = []   # (label, text)
-        for book, chapters in (legacy.get("chapter_notes") or {}).items():
-            name = os.path.basename(book)
-            for ck in sorted(chapters, key=lambda k: int(k) if k.isdigit() else 0):
-                if chapters[ck].strip():
-                    entries.append((f"{name} · 旧第 {int(ck) + 1 if ck.isdigit() else ck} 个文件", chapters[ck]))
-        if (legacy.get("sandbox_text") or "").strip():
-            entries.append(("未归章的草稿（旧 sandbox）", legacy["sandbox_text"]))
+        info_lines = []
+        if legacy:
+            for book, chapters in (legacy.get("chapter_notes") or {}).items():
+                name = os.path.basename(book)
+                for ck in sorted(chapters, key=lambda k: int(k) if k.isdigit() else 0):
+                    if chapters[ck].strip():
+                        entries.append((f"{name} · 旧第 {int(ck) + 1 if ck.isdigit() else ck} 个文件", chapters[ck]))
+            if (legacy.get("sandbox_text") or "").strip():
+                entries.append(("未归章的草稿（旧 sandbox）", legacy["sandbox_text"]))
+            info_lines.append(f"升级时间：{legacy.get('migrated_at', '?')}")
+            for book, bm in (legacy.get("bookmarks") or {}).items():
+                info_lines.append(f"旧书签：{os.path.basename(book)} → 第 {bm.get('chapter_idx', 0) + 1} 个文件，"
+                                  f"第 {bm.get('sentence_idx', 0) + 1} 句")
+        else:
+            info_lines.append("这个数据文件不是从旧版升级来的，没有旧笔记。旧 exe 旁边的 bookmarks.json 可以用下面的按钮导入。")
+        ctk.CTkLabel(win, text=chr(10).join(info_lines), justify="left", anchor="w", text_color=FG_DIM).pack(fill="x", padx=14, pady=(12, 6))
 
-        info_lines = [f"升级时间：{legacy.get('migrated_at', '?')}"]
-        for book, bm in (legacy.get("bookmarks") or {}).items():
-            info_lines.append(f"旧书签：{os.path.basename(book)} → 第 {bm.get('chapter_idx', 0) + 1} 个文件，"
-                              f"第 {bm.get('sentence_idx', 0) + 1} 句")
-        ttk.Label(win, text=chr(10).join(info_lines), justify=tk.LEFT).pack(anchor=tk.W, padx=10, pady=6)
-
-        body = tk.PanedWindow(win, orient=tk.HORIZONTAL, bg=self.bg_color, bd=0, sashwidth=4)
-        body.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
-        lb = tk.Listbox(body, bg="#2d2d2d", fg=self.fg_color, exportselection=False, width=40,
-                        selectbackground=self.highlight_bg, selectforeground=self.highlight_fg)
-        body.add(lb, minsize=250)
+        body = tk.PanedWindow(win, orient=tk.HORIZONTAL, bg=BG, bd=0, sashwidth=5)
+        body.pack(fill="both", expand=True, padx=14, pady=4)
+        lb = tk.Listbox(body, bg="#2d2d2d", fg=FG, exportselection=False, width=40, borderwidth=0, highlightthickness=0,
+                        selectbackground=HL_BG, selectforeground=HL_FG, font=("Microsoft YaHei", 10))
+        body.add(lb, minsize=260)
         for label, _ in entries:
             lb.insert(tk.END, label)
-        view = tk.Text(body, bg="#252526", fg=self.fg_color, font=("Microsoft YaHei", 11), wrap=tk.WORD,
+        if not entries:
+            lb.insert(tk.END, "（没有非空的旧笔记）")
+        view = tk.Text(body, bg="#252528", fg=FG, font=("Microsoft YaHei", 11), wrap=tk.WORD,
                        padx=12, pady=12, borderwidth=0, highlightthickness=0)
         body.add(view, minsize=400)
         view.config(state=tk.DISABLED)
@@ -656,7 +849,7 @@ class MainWindow:
             sel = lb.curselection()
             view.config(state=tk.NORMAL)
             view.delete("1.0", tk.END)
-            if sel:
+            if sel and sel[0] < len(entries):
                 view.insert("1.0", entries[sel[0]][1])
             view.config(state=tk.DISABLED)
 
@@ -664,7 +857,7 @@ class MainWindow:
 
         def append_to_current():
             sel = lb.curselection()
-            if not sel:
+            if not sel or sel[0] >= len(entries):
                 return
             text = entries[sel[0]][1]
             current = self._note_text()
@@ -674,19 +867,19 @@ class MainWindow:
 
         def copy_clipboard():
             sel = lb.curselection()
-            if not sel:
+            if not sel or sel[0] >= len(entries):
                 return
             self.root.clipboard_clear()
             self.root.clipboard_append(entries[sel[0]][1])
             self._set_status("已复制到剪贴板")
 
-        btns = ttk.Frame(win)
-        btns.pack(fill=tk.X, padx=10, pady=8)
-        ttk.Button(btns, text="追加到当前章笔记", command=append_to_current).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btns, text="复制到剪贴板", command=copy_clipboard).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btns, text="关闭", command=win.destroy).pack(side=tk.RIGHT, padx=2)
-        if not entries:
-            lb.insert(tk.END, "（旧数据里没有非空笔记）")
+        btns = ctk.CTkFrame(win, fg_color="transparent")
+        btns.pack(fill="x", padx=14, pady=10)
+        ctk.CTkButton(btns, text="追加到当前章笔记", command=append_to_current).pack(side="left", padx=4)
+        ctk.CTkButton(btns, text="复制到剪贴板", fg_color="#2c2c2c", hover_color="#3a3a3a", command=copy_clipboard).pack(side="left", padx=4)
+        ctk.CTkButton(btns, text="导入旧数据文件…", fg_color="#2c2c2c", hover_color="#3a3a3a",
+                      command=lambda: [win.destroy(), self._import_legacy_dialog()]).pack(side="left", padx=4)
+        ctk.CTkButton(btns, text="关闭", fg_color="#2c2c2c", hover_color="#3a3a3a", command=win.destroy).pack(side="right", padx=4)
 
     def _import_legacy_dialog(self):
         """旧目录改名后自动探测不到旧 bookmarks.json，让使用者自己指。导入后要重启才生效 ——
@@ -725,14 +918,13 @@ class MainWindow:
             messagebox.showinfo("导出", "本章没有可导出的内容。")
             return
 
-        win = tk.Toplevel(self.root)
+        win = ctk.CTkToplevel(self.root)
         win.title("导出 mp3")
-        win.geometry("420x160")
-        win.configure(bg="#1e1e1e")
+        win.geometry("460x200")
         win.transient(self.root)
-        lbl = ttk.Label(win, text="准备中…", font=("Arial", 10), wraplength=400, justify=tk.LEFT)
-        lbl.pack(pady=16, padx=12, anchor=tk.W)
-        ttk.Button(win, text="关闭", command=win.destroy).pack(pady=4)
+        lbl = ctk.CTkLabel(win, text="准备中…", wraplength=420, justify="left", anchor="w")
+        lbl.pack(pady=16, padx=16, fill="x")
+        ctk.CTkButton(win, text="关闭", width=80, command=win.destroy).pack(pady=6)
 
         try:
             chap_name = self.parser.chapters[self.current_chapter_idx].title
@@ -741,13 +933,13 @@ class MainWindow:
 
         def on_status_update(status_text):
             # 使用者可能已经把导出窗口关了，别往销毁的控件上写
-            self.root.after(0, lambda: win.winfo_exists() and lbl.config(text=status_text))
+            self.root.after(0, lambda: win.winfo_exists() and lbl.configure(text=status_text))
 
         def on_complete(success, summary):
             def show():
                 self._set_status(summary.splitlines()[0])
                 if win.winfo_exists():
-                    lbl.config(text=summary, foreground="lightgreen" if success else "orange")
+                    lbl.configure(text=summary, text_color="#8fbf8f" if success else "#e0a040")
                 if not success:
                     messagebox.showwarning("导出", summary)
             self.root.after(0, show)
@@ -862,13 +1054,13 @@ class MainWindow:
         self.active_session = None
         if target == "note":
             self.is_playing_sandbox = False
-            self.sandbox_play_btn.config(text="Play Note")
+            self.sandbox_play_btn.configure(text="▶ 播放笔记")
             if self.displayed_note and self.note_sentences:
                 idx = min(self.note_sentence_idx, len(self.note_sentences) - 1)
                 self.config.set_note_position(*self.displayed_note, self.note_sentences[idx]["start"])
             return
         self.is_playing = False
-        self.play_btn.config(text="Play")
+        self.play_btn.configure(text="▶ 播放")
         self._save_epub_bookmark()
         if status == "failed":
             self._set_status("播放中断：" + (skipped[-1][1] if skipped else "未知错误"))

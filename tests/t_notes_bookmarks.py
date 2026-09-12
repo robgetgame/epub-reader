@@ -34,8 +34,8 @@ class FakeTTS:
         self.settings = None
         events.put(("ready", [("sapi-1", "SAPI One")]))
 
-    def set_settings(self, voice_id, rate):
-        self.settings = (voice_id, rate)
+    def set_settings(self, voice_id, rate, volume=None):
+        self.settings = (voice_id, rate, volume)
 
     def play(self, sentences, start_idx=0, target="epub", end_idx=None):
         sid = self.next_id
@@ -129,10 +129,12 @@ def new_app(v1_data=None, v2_data=None):
     if v1_data is not None or v2_data is not None:
         with open(p, "w", encoding="utf-8") as f:
             json.dump(v1_data if v1_data is not None else v2_data, f, ensure_ascii=False)
-    for w in tk_root.winfo_children():
-        w.destroy()
+    global tk_root
     if new_app.prev is not None:
         new_app.prev._closed = True      # 停掉上一个实例的事件定时器
+        tk_root.destroy()                 # CustomTkinter 控件不能在旧根上重建，换一个根
+        tk_root = tk.Tk()
+        tk_root.withdraw()
     app = MainWindow(tk_root, layout)
     new_app.prev = app
     tk_root.update()
