@@ -58,8 +58,17 @@ class EdgeTTSDownloader:
             try:
                 communicate = edge_tts.Communicate(text, voice, rate=rate_str)
                 await communicate.save(tmp_path)
-                if os.path.getsize(tmp_path) > 0:
-                    os.rename(tmp_path, out_path)
+                if os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 0:
+                    import asyncio
+                    for _ in range(15):
+                        try:
+                            # os.replace handles cross-overwrites better mathematically
+                            os.replace(tmp_path, out_path)
+                            break
+                        except OSError as e:
+                            await asyncio.sleep(0.1)
+                    else:
+                        raise Exception(f"File locked permanently: {e}")
                 else:
                     os.remove(tmp_path)
             except Exception as e:
