@@ -149,14 +149,18 @@ class ChapterChatDialog(ctk.CTkToplevel):
         ctk.CTkLabel(top, text=f"· {chapter_title}", text_color=FG_DIM).pack(side="left", padx=4)
         self.kind_label_var = tk.StringVar(value="")
         ctk.CTkLabel(top, textvariable=self.kind_label_var, text_color=FG_DIM).pack(side="right", padx=14)
+        # 字号：默认跟主窗口走，A− / A+ 单独调并记住（使用者反馈 12 号太小）
+        ctk.CTkButton(top, text="A+", width=36, fg_color="#2c2c2c", hover_color="#3a3a3a",
+                      command=lambda: self._bump_font(+1)).pack(side="right", padx=(2, 8), pady=8)
+        ctk.CTkButton(top, text="A−", width=36, fg_color="#2c2c2c", hover_color="#3a3a3a",
+                      command=lambda: self._bump_font(-1)).pack(side="right", padx=2, pady=8)
         self._refresh_kind_label()
 
         # 对话区
         wrap = ctk.CTkFrame(self, fg_color="transparent")
         wrap.grid(row=1, column=0, sticky="nsew", padx=(10, 4), pady=6)
         self.text = tk.Text(wrap, bg="#1e1e20", fg=FG, wrap=tk.WORD, padx=14, pady=12, borderwidth=0,
-                            highlightthickness=0, font=(app.font_label_to_family.get(app.font_var.get(), "Microsoft YaHei"), 12),
-                            cursor="arrow", spacing3=4)
+                            highlightthickness=0, font=self._font(), cursor="arrow", spacing3=4)
         sb = ctk.CTkScrollbar(wrap, command=self.text.yview)
         self.text.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
@@ -165,7 +169,7 @@ class ChapterChatDialog(ctk.CTkToplevel):
         self.text.tag_configure("assistant", foreground=FG)
         self.text.tag_configure("system", foreground=FG_DIM)
         self.text.tag_configure("error", foreground="#e0a040")
-        self.text.tag_configure("role", foreground=FG_DIM, font=("Microsoft YaHei", 9))
+        self.text.tag_configure("role", foreground=FG_DIM, font=("Microsoft YaHei", max(8, self._font_size() - 4)))
         self.text.tag_configure("action", foreground="#7aa2d8", underline=True)
         self.text.bind("<Key>", lambda e: "break")
         self.text.bind("<Button-1>", self._on_text_click)
@@ -174,7 +178,7 @@ class ChapterChatDialog(ctk.CTkToplevel):
         bottom = ctk.CTkFrame(self, fg_color="transparent")
         bottom.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 6))
         bottom.grid_columnconfigure(0, weight=1)
-        self.input = ctk.CTkTextbox(bottom, height=64, wrap="word")
+        self.input = ctk.CTkTextbox(bottom, height=72, wrap="word", font=ctk.CTkFont(family=self._font()[0], size=self._font()[1]))
         self.input.grid(row=0, column=0, sticky="ew", padx=(0, 8))
         self.input.bind("<Control-Return>", lambda e: (self._send(), "break")[1])
         btns = ctk.CTkFrame(bottom, fg_color="transparent")
@@ -196,6 +200,23 @@ class ChapterChatDialog(ctk.CTkToplevel):
         self._refresh_usage()
         self._maybe_detect_kind()
         self._refresh_buttons()
+
+    # ---------- 字号 ----------
+
+    def _font_size(self):
+        saved = int(self.app.config.config.get("chat_font_size") or 0)
+        return saved if saved else int(self.app.font_size_var.get())
+
+    def _font(self):
+        return (self.app.font_label_to_family.get(self.app.font_var.get(), "Microsoft YaHei"), self._font_size())
+
+    def _bump_font(self, delta):
+        size = max(8, min(40, self._font_size() + delta))
+        self.app.config.config["chat_font_size"] = size
+        self.app.config.save()
+        self.text.configure(font=self._font())
+        self.input.configure(font=ctk.CTkFont(family=self._font()[0], size=size))
+        self.text.tag_configure("role", font=("Microsoft YaHei", max(8, size - 4)))
 
     # ---------- 显示 ----------
 

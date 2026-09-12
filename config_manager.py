@@ -30,6 +30,7 @@ def _defaults():
         "volume": 100,          # D24
         "font_family": "Microsoft YaHei",   # D22
         "font_size": 16,
+        "chat_font_size": 0,    # 0 = 跟主窗口字号走；否则 AI 对话窗单独的字号
         "bookmarks": {},        # book_key -> {"chapter": int, "offset": int}
         "notes": {},            # book_key -> {chapter_key: text}
         "note_positions": {},   # book_key -> {chapter_key: offset}
@@ -73,6 +74,9 @@ def validate(data):
     fs = data.get("font_size", 16)
     if not isinstance(fs, (int, float)) or isinstance(fs, bool) or not 8 <= fs <= 72:
         problems.append("font_size 不在 8–72")
+    cfs = data.get("chat_font_size", 0)
+    if not isinstance(cfs, (int, float)) or isinstance(cfs, bool) or not (cfs == 0 or 8 <= cfs <= 72):
+        problems.append("chat_font_size 不在 0 或 8–72")
 
     schema = data.get("schema")
     if schema is None:
