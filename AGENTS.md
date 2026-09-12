@@ -57,3 +57,5 @@
 | Edge-TTS Cache：「stored in a local `/temp_audio/` folder」 | 数据与缓存目录改为 `%LOCALAPPDATA%\EpubReader\`，可用 `data_dir` 指向同步目录 | D17 / D23，2026-09-12 本人拍板 |
 | UI/UX：「Tkinter … Dark Mode」 | 界面层改用 CustomTkinter 重写，仍为深色 | D21，2026-09-12 本人拍板 |
 | §3 Agentic Directives：「Zero Fluff … Output only functional code」 | 不适用于后续维护。工作方式按 `docs/DESIGN-REVIEW-2026-09-12-v2.md` §6 / A.8：调查 → 问 → 决定 → 写代码；每步单独提交并附验证脚本 | 2026-09-12 |
+| Speed Control：「a UI slider bound to the TTS engine's speech rate」 | 增加音量滑块、字体 / 字号选择 | D22 / D24，2026-09-12 本人拍板 |
+| Raw Text Sandbox：「Provide a completely separate, dedicated set of Play/Stop buttons」 | 保留；另加「AI 讲解…」对话窗（生成讲解、追问、放进笔记）与每本书的类型选择 | D7 / D25，2026-09-12 本人拍板 |

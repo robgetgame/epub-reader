@@ -1,60 +1,55 @@
-# Native EPUB TTS Reader
+# EPUB Reader
 
-A powerful, native Windows GUI desktop application designed for reading EPUB books aloud with perfect sentence synchronization and multi-voice character acting. 
+Windows 桌面程序：打开 `.epub`，按章朗读（本机 SAPI 或微软在线神经音色），句子级高亮，
+每章一份可编辑、可朗读的笔记，AI 生成章节讲解并可追问。单人使用。
 
-Written in pure Python, it features a dual-engine architecture that seamlessly bridges offline Windows narrators (SAPI5) with high-fidelity, online Microsoft Azure Neural voices (`edge-tts`).
+## 运行
 
-## Features
+- 直接跑 `dist\EpubReader.exe`（用 `build.ps1` 打包），或者源码：
 
-- **Painless EPUB Reading**: Parses EPUB files flawlessly, stripping out bloated HTML/CSS and splitting text precisely by punctuation into clean, readable sentences.
-- **Synchronized Highlighting**: The currently spoken sentence is highlighted on-screen in real time, with the viewport automatically scrolling to keep your reading position comfortably centered.
-- **Dual-Engine Architecture**: 
-  - **Offline Mode**: Uses your PC's native, built-in Windows COM SAPI5 voices for extremely stable, zero-latency offline reading.
-  - **Online Neural Mode**: Connects to Microsoft's Azure Edge-TTS websockets. It features an aggressive background lookahead buffer that pre-downloads the next upcoming sentences to a local cache, allowing gapless, zero-latency playback of ultra-high-quality Neural voices.
-- **Chapter Notes & Multi-Voice Scripting**: 
-  - A dedicated third pane for taking chapter-specific notes or pasting loose text. Notes are automatically saved to `config.json` and tied to the specific EPUB chapter you are on.
-  - **Multi-Voice Acting**: In the Chapter Note area, you can dynamically assign different TTS voices to specific character dialogues by wrapping their words in `{character}` tags. The application will dynamically jump between Offline/Online rendering engines sentence-by-sentence depending on who is talking!
+```powershell
+py -3.13 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe main.py
+```
 
-## Multi-Voice Scripting Guide
+- 数据在 `%LOCALAPPDATA%\EpubReader\`（`bookmarks.json` 书签和笔记、`ai_chat.json` 对话、
+  `temp_audio\` 音频缓存、`config.json` 可选配置）。顶栏「数据目录」直达。换新 exe 直接覆盖，数据不动。
+- 导出的 mp3 在 `文档\EpubReader\Audio\`。
+- 第一次从旧版升级：旧的 `bookmarks.json` 用「旧笔记 → 导入旧数据文件…」选进来；旧笔记和旧书签原样保留在
+  「旧笔记」窗口里，可以复制到当前章。书签要手动重新定位一次。
 
-You can designate speakers in your notes by simply wrapping their text. Text without tags will use your global fallback voice.
+## AI 讲解
 
-### Supported Tags
-- `{yunxi}` ... `{/yunxi} ` (Male, Chinese)
-- `{xiaoxiao}` ... `{/xiaoxiao}` (Female, Chinese)
-- `{yunyang}` ... `{/yunyang}` (Male Narrator, Chinese)
-- `{guy}` ... `{/guy}` (Male, English)
-- `{aria}` ... `{/aria}` (Female, English)
-- `{jenny}` ... `{/jenny}` (Female Narrator, English)
+- 走 OpenRouter。key 放 Windows 用户环境变量 `OPENROUTER_KEY`（设完重启程序）：
 
-*Example:*
-> {yunxi} "Greetings, traveler!" {/yunxi} The barkeep smiled warmly. {aria} "Can I get a drink?" {/aria}
+```powershell
+[Environment]::SetEnvironmentVariable("OPENROUTER_KEY", "你的key", "User")
+```
 
-## Installation & Running
+- 默认模型 `deepseek/deepseek-v4.1-flash`。`config.json` 可改：
 
-### Download Executeable (Windows)
-1. Navigate to the **[Releases](https://github.com/robgetgame/epub-reader/releases)** page on the right side of this GitHub repository.
-2. Download the latest `main.exe` binary file under **Assets**.
-3. Double click the `.exe` file to run the Reader instantly! No Python or external dependencies are required.
+```json
+{
+  "model": "deepseek/deepseek-v4.1-flash",
+  "history_turns": 10,
+  "data_dir": "C:\Users\你\Google Drive\EpubReader",
+  "export_dir": "D:\Audio"
+}
+```
 
-### Run via Command Line
-If you wish to run the project from standard Python source code:
-1. Ensure Python 3.8+ is installed on your Windows machine.
-2. Clone this repository.
-3. Install dependencies:
-   ```cmd
-   pip install -r requirements.txt
-   ```
-4. Run the application:
-   ```cmd
-   python main.py
-   ```
+- `data_dir` 指到云盘目录可多机同步（Google Drive 用「镜像文件」模式，不要「流式传输」）。
+  缓存和实例锁永远留本机。目录不可用时程序只读启动并提示，不会在别处新建数据。
+- 每本书第一次打开 AI 窗口会自动判定是小说还是非虚构（右栏「这本书的类型」可改），
+  讲解稿按类型用不同结构，长度约本章的 1/10，语言跟书走。费用用 OpenRouter 返回的实际值累计。
 
-## Compiling Your Own EXE
-To compile this project yourself into a single, portable Windows `.exe` application:
-1. Ensure you have `pyinstaller` installed (`pip install pyinstaller`).
-2. Run the build command:
-   ```cmd
-   pyinstaller --onefile --windowed main.py
-   ```
-3. Locate `main.exe` in the generated `/dist` folder.
+## 笔记里的多音色标签
+
+手写笔记可以用 `{yunxi}…{/yunxi}`、`{xiaoxiao}`、`{yunyang}`、`{guy}`、`{aria}`、`{jenny}` 切换在线音色。
+AI 生成的讲解稿是单人叙述，不带标签。
+
+## 开发
+
+- 没有测试框架：`python tests\run_all.py` 跑 `tests\t_*.py`，任一失败退出非零。全部不联网、不碰真实数据。
+- 设计文档和两轮审计在 `docs\`；原始规格和修订附录在 `AGENTS.md`。
+- 打包：`.\build.ps1`（先跑测试，测试不过不打包）。

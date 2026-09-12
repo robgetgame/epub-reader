@@ -279,7 +279,7 @@ class MainWindow:
         # --- 右：笔记 ---
         right = ctk.CTkFrame(paned, fg_color=BG_NOTE, corner_radius=0)
         paned.add(right, minsize=320, width=400, stretch="never")
-        right.grid_rowconfigure(1, weight=1)
+        right.grid_rowconfigure(2, weight=1)
         right.grid_columnconfigure(0, weight=1)
         hdr = ctk.CTkFrame(right, fg_color="transparent")
         hdr.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 4))
@@ -287,17 +287,19 @@ class MainWindow:
         ctk.CTkLabel(hdr, textvariable=self.note_title_var, font=ctk.CTkFont(size=13, weight="bold")).pack(side="left")
         self.note_state_var = tk.StringVar(value="")
         ctk.CTkLabel(hdr, textvariable=self.note_state_var, text_color=FG_DIM).pack(side="left", padx=6)
-        # 书的类型（D25）：一本书选一次；AI 讲解（第 8 步）按它选结构
-        self.kind_var = tk.StringVar(value=KIND_UNSET)
-        self.kind_menu = ctk.CTkOptionMenu(hdr, variable=self.kind_var, values=[KIND_UNSET] + list(KIND_LABELS.values()),
-                                           width=96, command=self._on_kind_change, fg_color="#2c2c2c", button_color="#3a3a3a")
         self.ai_btn = ctk.CTkButton(hdr, text="AI 讲解…", width=90, fg_color=ACCENT, hover_color=ACCENT_HOVER, command=self._open_ai_dialog)
-        self.ai_btn.pack(side="right", padx=(10, 0))
-        self.kind_menu.pack(side="right")
-        ctk.CTkLabel(hdr, text="类型", text_color=FG_DIM).pack(side="right", padx=(8, 6))
+        self.ai_btn.pack(side="right")
+        # 第二行：书的类型（D25）。一本书选一次；AI 讲解按它选结构。单独一行，右栏窄的时候不会挤成一个箭头
+        hdr2 = ctk.CTkFrame(right, fg_color="transparent")
+        hdr2.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 6))
+        ctk.CTkLabel(hdr2, text="这本书的类型", text_color=FG_DIM).pack(side="left", padx=(0, 8))
+        self.kind_var = tk.StringVar(value=KIND_UNSET)
+        self.kind_menu = ctk.CTkOptionMenu(hdr2, variable=self.kind_var, values=[KIND_UNSET] + list(KIND_LABELS.values()),
+                                           width=110, command=self._on_kind_change, fg_color="#2c2c2c", button_color="#3a3a3a")
+        self.kind_menu.pack(side="left")
 
         note_wrap = ctk.CTkFrame(right, fg_color="transparent")
-        note_wrap.grid(row=1, column=0, sticky="nsew", padx=(8, 4))
+        note_wrap.grid(row=2, column=0, sticky="nsew", padx=(8, 4))
         self.sandbox_area = tk.Text(note_wrap, bg="#252528", fg=FG, wrap=tk.WORD, padx=16, pady=16,
                                     borderwidth=0, highlightthickness=0, undo=True, insertbackground=FG,
                                     selectbackground="#3b6ea5", selectforeground="#fff")
@@ -310,7 +312,7 @@ class MainWindow:
         self.sandbox_area.bind("<FocusOut>", lambda e: self._save_displayed_note())
 
         foot = ctk.CTkFrame(right, fg_color="transparent")
-        foot.grid(row=2, column=0, sticky="ew", padx=12, pady=8)
+        foot.grid(row=3, column=0, sticky="ew", padx=12, pady=8)
         self.sandbox_play_btn = ctk.CTkButton(foot, text="▶ 播放笔记", width=100, fg_color="#2c2c2c", hover_color="#3a3a3a", command=self._toggle_sandbox_play)
         self.sandbox_play_btn.pack(side="left")
         ctk.CTkButton(foot, text="清空", width=60, fg_color="#2c2c2c", hover_color="#3a3a3a", command=self._clear_sandbox).pack(side="right")
