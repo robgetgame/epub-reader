@@ -52,6 +52,10 @@ class MainWindow:
         self._build_ui()
         self._setup_keybinds()
         self._load_voices()
+
+        # 数据文件读的时候出过事（从 .bak 恢复 / 两个都坏）必须让人知道，不能静默用默认值
+        if self.config.load_error:
+            messagebox.showwarning("数据文件", self.config.load_error)
         
         # Resume operations
         self._reload_last_session()
